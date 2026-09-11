@@ -1,0 +1,97 @@
+$schema: https://opencli.org/draft.json
+opencli: "0.1"
+
+info:
+  title: Checksmith
+  summary: Deterministic quality gate that checks a configurable number of tools for coding standard violations.
+  description: >-
+    Checksmith provides a single interface to a configurable number of code quality tools 
+    and provides installation methods to hook those quality gates up to your coding agent(s) of choice.
+  version: "0.1.0"
+
+command:
+  name: checksmith
+  description: Manage coding-agent integrations and enforce project checks.
+  examples:
+    - checksmith agents install
+    - checksmith agents uninstall
+    - checksmith init
+    - checksmith check full
+
+  options:
+    - name: --help
+      aliases:
+        - -h
+      description: Show help for Checksmith or the selected command.
+
+    - name: --version
+      description: Show the installed Checksmith version.
+
+  exitCodes:
+    - code: 0
+      description: The operation completed successfully.
+    - code: 1
+      description: The operation completed but found a failing or unhealthy state.
+    - code: 2
+      description: The command, configuration, or input was invalid.
+    - code: 3
+      description: Checksmith or an external tool could not complete the operation.
+
+  commands:
+    - name: agents
+      description: Manage integrations with supported coding agents.
+      commands:
+        - name: install
+          description: Register integrations with selected coding agents.
+          interactive: false
+          metadata:
+            - name: checksmith.operation
+              value:
+                 operationId: agents.install
+            - name: checksmith.output
+              value:
+                kind: OutputAgentsInstall
+          examples:
+            - checksmith agents install
+
+        - name: uninstall
+          description: Remove integrations from selected coding agents.
+          interactive: false
+          metadata:
+            - name: checksmith.operation
+              value:
+                 operationId: agents.uninstall
+            - name: checksmith.output
+              value:
+                kind: OutputAgentsUninstall
+          examples:
+            - checksmith agents uninstall
+
+    - name: init
+      description: Create the project's Checksmith TOML configuration.
+      interactive: false
+      metadata:
+        - name: checksmith.operation
+          value:
+            operationId: init
+        - name: checksmith.output
+          value:
+            kind: OutputInit
+      examples:
+        - checksmith init
+
+    - name: check
+      description: Execute project checks and report their results.
+      commands:
+        - name: full
+          description: Execute the complete configured check suite and report results.
+          interactive: false
+          metadata:
+            - name: checksmith.operation
+              value:
+                operationId: check.full
+            - name: checksmith.output
+              value:
+                kind: OutputCheckFull
+          examples:
+            - checksmith check full
