@@ -4,6 +4,10 @@ description = "Deterministic quality gate that checks a configurable number of t
 version = "0.1.0"
 requires-python = ">=3.14"
 dependencies = [
+    "pydantic>=2.13.5",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "rich>=15",
     "typer>=0.12",
 ]
 
