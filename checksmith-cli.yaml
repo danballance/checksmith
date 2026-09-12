@@ -50,7 +50,7 @@ command:
                  operationId: agents.install
             - name: checksmith.output
               value:
-                kind: OutputAgentsInstall
+                kind: AgentsInstall
           examples:
             - checksmith agents install
 
@@ -63,7 +63,7 @@ command:
                  operationId: agents.uninstall
             - name: checksmith.output
               value:
-                kind: OutputAgentsUninstall
+                kind: AgentsUninstall
           examples:
             - checksmith agents uninstall
 
@@ -76,7 +76,7 @@ command:
             operationId: init
         - name: checksmith.output
           value:
-            kind: OutputInit
+            kind: Init
       examples:
         - checksmith init
 
@@ -86,12 +86,25 @@ command:
         - name: full
           description: Execute the complete configured check suite and report results.
           interactive: false
+          options:
+            - name: --format
+              description: Select the output format for this command.
+              arguments:
+                - name: format
+                  required: true
+                  acceptedValues:
+                    - text
+                    - json
+                  description: >-
+                    Output format. Use `text` for human-readable console output
+                    and `json` for machine-readable output. Defaults to `text`.
           metadata:
             - name: checksmith.operation
               value:
                 operationId: check.full
             - name: checksmith.output
               value:
-                kind: OutputCheckFull
+                kind: CheckFull
           examples:
             - checksmith check full
+            - checksmith check full --format json
