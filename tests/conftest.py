@@ -9,4 +9,4 @@ from checksmith.config import Config
 
 @pytest.fixture
 def config() -> Config:
-    return Config(path=Path("tools.yaml"))
+    return Config(path=Path("checksmith.yaml"))

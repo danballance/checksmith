@@ -10,7 +10,7 @@ from checksmith.config import Config
 @pytest.fixture
 def config_path() -> Path:
     """Path a ``Config`` is pointed at. No file is created there."""
-    return Path("tools.yaml")
+    return Path("checksmith.yaml")
 
 
 @pytest.fixture
