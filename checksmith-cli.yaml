@@ -33,9 +33,7 @@ command:
     - code: 1
       description: The operation completed but found a failing or unhealthy state.
     - code: 2
-      description: The command, configuration, or input was invalid.
-    - code: 3
-      description: Checksmith or an external tool could not complete the operation.
+      description: Checksmith could not complete the operation.
 
   commands:
     - name: agents
