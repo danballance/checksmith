@@ -6,7 +6,7 @@ that renders them, and ``ToolResult`` is produced by a tool and consumed by the
 output that displays it.
 """
 
-from enum import IntEnum
+from enum import IntEnum, StrEnum
 
 from pydantic import BaseModel
 
@@ -35,3 +35,13 @@ class ToolResult(BaseModel):
 
     findings: tuple[str, ...] = ()
     """Human-readable descriptions of what the tool reported."""
+
+
+class RunnerName(StrEnum):
+    """How a check's package is fetched and executed."""
+
+    UVX = "uvx"
+    """A Python package, run through ``uvx``."""
+
+    NPX = "npx"
+    """An npm package, run through ``npx``."""

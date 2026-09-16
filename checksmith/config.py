@@ -4,7 +4,7 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final, Self
+from typing import Final, Self, cast
 
 import yaml
 from pydantic import (
@@ -16,13 +16,13 @@ from pydantic import (
     field_validator,
 )
 
+from checksmith.dtos import RunnerName
 from checksmith.errors import (
     ConfigSchemaError,
     ConfigSyntaxError,
     SchemaViolation,
 )
-from checksmith.runners.base import RunnerName
-from checksmith.runners.registry import runner_for
+from checksmith.runners import PackageRunner
 
 SUPPORTED_SCHEMA_VERSION: Final = 1
 
@@ -47,7 +47,8 @@ class Check(BaseModel):
         if runner is None:
             # ``runner`` itself did not validate; that is the error worth fixing.
             return value
-        runner_for(name=runner).validate_package(package=value)
+        runner = cast(RunnerName, runner)
+        PackageRunner.from_name(name=runner).validate_package(package=value)
         return value
 
 

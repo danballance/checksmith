@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from checksmith.config import Config
-from checksmith.runners.base import RunnerName
+from checksmith.dtos import RunnerName
 from checksmith.tools.tool_factory import ToolFactory
 
 

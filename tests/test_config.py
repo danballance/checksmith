@@ -10,7 +10,7 @@ import pytest
 
 from checksmith.config import Config
 from checksmith.errors import ConfigSchemaError, ConfigSyntaxError
-from checksmith.runners.base import RunnerName
+from checksmith.dtos import RunnerName
 
 CONFIG_PATH = Path("/project/.checksmith/checksmith.yaml")
 

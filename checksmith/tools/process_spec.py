@@ -11,7 +11,7 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict
 
 from checksmith.config import Check
-from checksmith.runners.registry import runner_for
+from checksmith.runners import PackageRunner
 
 
 class ProcessSpec(BaseModel):
@@ -34,7 +34,7 @@ class ProcessSpec(BaseModel):
         executes shares the one the caller passes here.
         """
         return cls(
-            argv=runner_for(name=check.runner).build_argv(
+            argv=PackageRunner.from_name(name=check.runner).build_argv(
                 package=check.package,
                 command=check.command,
                 arguments=check.args,

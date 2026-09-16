@@ -2,8 +2,8 @@
 
 import pytest
 
-from checksmith.runners.base import RunnerName
-from checksmith.runners.npx import NpxRunner
+from checksmith.dtos import RunnerName
+from checksmith.runners import NpxRunner
 
 
 @pytest.fixture

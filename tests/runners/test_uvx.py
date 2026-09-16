@@ -2,8 +2,8 @@
 
 import pytest
 
-from checksmith.runners.base import RunnerName
-from checksmith.runners.uvx import UvxRunner
+from checksmith.dtos import RunnerName
+from checksmith.runners import UvxRunner
 
 
 @pytest.fixture
