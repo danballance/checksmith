@@ -1,0 +1,16 @@
+schema_version: 1
+
+# Relative to the directory containing this config file.
+project_root: ..
+
+checks:
+  - id: ruff
+    runner: uvx
+    package: "ruff==0.16.7"
+    command: ruff
+
+    args:
+      - check
+      - --config
+      - ./ruff.toml
+      - .

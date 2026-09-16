@@ -16,7 +16,7 @@ command:
     - checksmith agents install
     - checksmith agents uninstall
     - checksmith init
-    - checksmith check full
+    - checksmith check --config .checksmith/checksmith.yaml
 
   options:
     - name: --help
@@ -45,7 +45,7 @@ command:
           metadata:
             - name: checksmith.operation
               value:
-                 operationId: agents.install
+                operationId: agents.install
             - name: checksmith.output
               value:
                 kind: AgentsInstall
@@ -58,7 +58,7 @@ command:
           metadata:
             - name: checksmith.operation
               value:
-                 operationId: agents.uninstall
+                operationId: agents.uninstall
             - name: checksmith.output
               value:
                 kind: AgentsUninstall
@@ -66,7 +66,7 @@ command:
             - checksmith agents uninstall
 
     - name: init
-      description: Create the project's Checksmith TOML configuration.
+      description: Create the project's Checksmith YAML configuration.
       interactive: false
       metadata:
         - name: checksmith.operation
@@ -79,30 +79,39 @@ command:
         - checksmith init
 
     - name: check
-      description: Execute project checks and report their results.
-      commands:
-        - name: full
-          description: Execute the complete configured check suite and report results.
-          interactive: false
-          options:
-            - name: --format
-              description: Select the output format for this command.
-              arguments:
-                - name: format
-                  required: true
-                  acceptedValues:
-                    - text
-                    - json
-                  description: >-
-                    Output format. Use `text` for human-readable console output
-                    and `json` for machine-readable output. Defaults to `text`.
-          metadata:
-            - name: checksmith.operation
-              value:
-                operationId: check.full
-            - name: checksmith.output
-              value:
-                kind: CheckFull
-          examples:
-            - checksmith check full
-            - checksmith check full --format json
+      description: Execute the project's configured checks and report their results.
+      interactive: false
+      options:
+        - name: --format
+          description: Select the output format for this command.
+          arguments:
+            - name: format
+              required: true
+              acceptedValues:
+                - text
+                - json
+              description: >-
+                Output format. Use `text` for human-readable console output
+                and `json` for machine-readable output. Defaults to `text`.
+
+        - name: --config
+          required: true
+          description: Select the config file describing the checks to run.
+          arguments:
+            - name: config
+              required: true
+              description: >-
+                Path to a config file. A relative path resolves from the
+                caller's current directory. Checksmith never searches for a
+                config file and never falls back to another file: if the named
+                path cannot be read, that is an error.
+      metadata:
+        - name: checksmith.operation
+          value:
+            operationId: check
+        - name: checksmith.output
+          value:
+            kind: Check
+      examples:
+        - checksmith check --config .checksmith/checksmith.yaml
+        - checksmith check --config checksmith.yaml --format json

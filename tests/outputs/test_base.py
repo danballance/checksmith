@@ -32,8 +32,9 @@ def test_a_complete_subclass_can_be_instantiated() -> None:
 def test_outputs_are_frozen() -> None:
     output = Complete(detail="done")
 
-    with pytest.raises(ValidationError):
-        output.detail = "changed"
+    for field in Complete.model_fields:
+        with pytest.raises(ValidationError):
+            setattr(output, field, "changed")
 
 
 def test_outputs_serialise_to_json() -> None:

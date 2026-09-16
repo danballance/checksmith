@@ -1,28 +1,14 @@
-"""Output model for the ``check full`` operation."""
+"""Output model for the ``check`` operation."""
 
-from pydantic import BaseModel
 from rich.console import RenderableType
 from rich.table import Table
 
-from checksmith.dtos import ExitCode
+from checksmith.dtos import ExitCode, ToolResult
 from checksmith.outputs.base import CliOutput
 
 
-class ToolResult(BaseModel):
-    """Outcome of running a single configured tool."""
-
-    name: str
-    """Name of the tool that was run."""
-
-    failed: bool = False
-    """Whether the tool reported a coding standard violation."""
-
-    findings: tuple[str, ...] = ()
-    """Human-readable descriptions of what the tool reported."""
-
-
-class CheckFull(CliOutput):
-    """Result of executing the complete configured check suite."""
+class Check(CliOutput):
+    """Result of executing the project's configured checks."""
 
     results: tuple[ToolResult, ...] = ()
 
