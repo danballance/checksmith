@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 
 from checksmith.config import Config
-from checksmith.errors import ConfigSchemaError, ConfigSyntaxError
 from checksmith.dtos import RunnerName
+from checksmith.errors import ConfigSchemaError, ConfigSyntaxError
 
 CONFIG_PATH = Path("/project/.checksmith/checksmith.yaml")
 

@@ -1,7 +1,12 @@
 """Execution of the configured tools."""
 
+import logging
+
+from checksmith.dtos import ToolResult
 from checksmith.outputs.checkoutput import CheckOutput
 from checksmith.tools.tool import Tool
+
+logger = logging.getLogger(__name__)
 
 
 class Runner:
@@ -14,4 +19,15 @@ class Runner:
         """Run every tool and collect its result."""
         if len(self.tools) == 0:
             raise ValueError("a run needs at least one tool; none were configured")
-        return CheckOutput(results=tuple(tool.run() for tool in self.tools))
+        logger.debug("running %d tools", len(self.tools))
+        results: list[ToolResult] = []
+        for tool in self.tools:
+            result = tool.run()
+            logger.debug(
+                "%s failed=%s findings=%d",
+                result.name,
+                result.failed,
+                len(result.findings),
+            )
+            results.append(result)
+        return CheckOutput(results=tuple(results))

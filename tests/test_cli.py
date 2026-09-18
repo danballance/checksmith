@@ -12,9 +12,16 @@ from typer.core import TyperGroup
 from typer.testing import CliRunner
 
 from checksmith import __version__
-from checksmith.cli import ChecksmithGroup, OutputFormat, _emit, app
+from checksmith.cli import (
+    ChecksmithGroup,
+    DebugOption,
+    OutputFormat,
+    _emit,
+    app,
+)
 from checksmith.dtos import ExitCode, ToolResult
 from checksmith.errors import ConfigSyntaxError
+from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
 
 
@@ -180,12 +187,15 @@ def _grouped_app(name: str, body: Callable[[], None]) -> typer.Typer:
     """Build a throwaway app whose root group is the Checksmith error boundary.
 
     The callback is what makes Typer emit a group rather than collapsing a
-    lone command into a bare ``Command``, which would bypass ``cls``.
+    lone command into a bare ``Command``, which would bypass ``cls``. It carries
+    the same ``--debug`` wiring as the real root callback, so what these tests
+    exercise is the arrangement the real app uses.
     """
     built = typer.Typer(cls=ChecksmithGroup)
 
     @built.callback()
-    def _root() -> None: ...
+    def _root(debug: DebugOption = False) -> None:
+        configure_logging(debug=debug)
 
     built.command(name)(body)
     return built

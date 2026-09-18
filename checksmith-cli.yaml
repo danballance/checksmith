@@ -27,6 +27,14 @@ command:
     - name: --version
       description: Show the installed Checksmith version.
 
+    - name: --debug
+      aliases:
+        - -d
+      description: >-
+        Write debug logging to stderr. May be given anywhere on the command
+        line, before or after the subcommand. Results stay on stdout, so
+        `--debug --format json` is still parseable.
+
   exitCodes:
     - code: 0
       description: The operation completed successfully.

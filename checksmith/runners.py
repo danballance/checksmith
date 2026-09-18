@@ -1,3 +1,4 @@
+import logging
 from abc import ABC, abstractmethod
 from typing import Final
 
@@ -5,6 +6,8 @@ import nodesemver
 from packaging.requirements import InvalidRequirement, Requirement
 
 from checksmith.dtos import RunnerName
+
+logger = logging.getLogger(__name__)
 
 
 class PackageRunner(ABC):
@@ -117,6 +120,11 @@ class NpxRunner(PackageRunner):
             raise ValueError(
                 f"npx package version must constrain a version, got: {version_range!r}"
             )
+        # The normalised range is the interesting half: what npm will resolve
+        # bears little resemblance to what the config file wrote.
+        logger.debug(
+            "npx accepted %s, range %s -> %s", package, version_range, normalized
+        )
 
     def build_argv(
         self,
@@ -125,7 +133,9 @@ class NpxRunner(PackageRunner):
         command: str,
         arguments: tuple[str, ...],
     ) -> tuple[str, ...]:
-        return ("npx", "--yes", "--package", package, command, *arguments)
+        argv = ("npx", "--yes", "--package", package, command, *arguments)
+        logger.debug("npx built %s", argv)
+        return argv
 
 
 class UvxRunner(PackageRunner):
@@ -155,6 +165,13 @@ class UvxRunner(PackageRunner):
             ) from error
         if len(requirement.specifier) == 0:
             raise ValueError(f"uvx package must constrain a version, got: {package!r}")
+        logger.debug(
+            "uvx accepted %s, name=%s specifier=%s extras=%s",
+            package,
+            requirement.name,
+            requirement.specifier,
+            sorted(requirement.extras),
+        )
 
     def build_argv(
         self,
@@ -163,4 +180,6 @@ class UvxRunner(PackageRunner):
         command: str,
         arguments: tuple[str, ...],
     ) -> tuple[str, ...]:
-        return ("uvx", "--from", package, command, *arguments)
+        argv = ("uvx", "--from", package, command, *arguments)
+        logger.debug("uvx built %s", argv)
+        return argv

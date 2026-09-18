@@ -1,5 +1,6 @@
 """Reading, validating and resolving the Checksmith config file."""
 
+import logging
 import os
 import re
 from collections.abc import Mapping
@@ -23,6 +24,8 @@ from checksmith.errors import (
     SchemaViolation,
 )
 from checksmith.runners import PackageRunner
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_SCHEMA_VERSION: Final = 1
 
@@ -94,6 +97,11 @@ class Config(BaseModel):
                     f"found {type(document).__name__}"
                 ),
             )
+        logger.debug(
+            "read %s: top-level keys %s",
+            path,
+            sorted(str(key) for key in document),
+        )
         return document
 
     @classmethod
@@ -107,6 +115,7 @@ class Config(BaseModel):
         base_directory = working_directory
         value = str(config_path)
         path = Path(os.path.normpath(base_directory / value))
+        logger.debug("resolving %s against %s -> %s", value, base_directory, path)
         return cls.from_mapping(document=cls._read(path=path), config_path=path)
 
     @classmethod
@@ -116,9 +125,19 @@ class Config(BaseModel):
         document: Mapping[object, object],
         config_path: Path,
     ) -> Self:
+        logger.debug(
+            "validating %s against schema version %d",
+            config_path,
+            SUPPORTED_SCHEMA_VERSION,
+        )
         try:
-            return cls.model_validate(document, context=config_path)
+            config = cls.model_validate(document, context=config_path)
         except ValidationError as error:
+            logger.debug(
+                "%s rejected: %d schema violations",
+                config_path,
+                error.error_count(),
+            )
             raise ConfigSchemaError(
                 config_path=config_path,
                 violations=tuple(
@@ -129,3 +148,20 @@ class Config(BaseModel):
                     for detail in error.errors()
                 ),
             ) from error
+        logger.debug(
+            "parsed %d checks, project_root=%s",
+            len(config.checks),
+            config.project_root,
+        )
+        for check in config.checks:
+            # Per check rather than one dump of the model: this is the level a
+            # surprising run is diagnosed at --- which package, which argv.
+            logger.debug(
+                "check %s: runner=%s package=%s command=%s args=%s",
+                check.id,
+                check.runner,
+                check.package,
+                check.command,
+                check.args,
+            )
+        return config

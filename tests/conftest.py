@@ -1,10 +1,31 @@
 """Shared fixtures for the Checksmith test suite."""
 
+import logging
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from checksmith.config import Config
+from checksmith.logs import LOGGER_NAME
+
+
+@pytest.fixture(autouse=True)
+def restore_the_package_logger() -> Iterator[None]:
+    """Put the ``checksmith`` logger back as every test found it.
+
+    ``configure_logging`` mutates process-global state, and the CLI calls it on
+    every invocation. Without this, one test would decide what the next logs.
+    """
+    logger = logging.getLogger(LOGGER_NAME)
+    handlers = list(logger.handlers)
+    level = logger.level
+    propagate = logger.propagate
+    yield
+    logger.handlers = handlers
+    logger.setLevel(level)
+    logger.propagate = propagate
+
 
 CONFIG_TEXT = """\
 schema_version: 1

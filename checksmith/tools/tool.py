@@ -1,11 +1,14 @@
 """A single configured check, and the interface every kind of check satisfies."""
 
+import logging
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from checksmith.dtos import ToolResult
 from checksmith.tools.process_spec import ProcessSpec
+
+logger = logging.getLogger(__name__)
 
 
 class Tool(Protocol):
@@ -50,6 +53,12 @@ class ProcessTool(BaseModel):
         Not implemented yet. Returning a passing :class:`ToolResult` would be
         worse than failing: it would report success for a check that never ran.
         """
+        logger.debug(
+            "%s argv=%s cwd=%s",
+            self.name,
+            self.spec.argv,
+            self.spec.working_directory,
+        )
         raise NotImplementedError(
             f"Check execution is not implemented yet; cannot run check: {self.name}"
         )
