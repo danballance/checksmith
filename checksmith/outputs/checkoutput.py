@@ -7,7 +7,7 @@ from checksmith.dtos import ExitCode, ToolResult
 from checksmith.outputs.base import CliOutput
 
 
-class Check(CliOutput):
+class CheckOutput(CliOutput):
     """Result of executing the project's configured checks."""
 
     results: tuple[ToolResult, ...] = ()

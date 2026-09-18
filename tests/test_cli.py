@@ -15,7 +15,7 @@ from checksmith import __version__
 from checksmith.cli import ChecksmithGroup, OutputFormat, _emit, app
 from checksmith.dtos import ExitCode, ToolResult
 from checksmith.errors import ConfigSyntaxError
-from checksmith.outputs.check import Check
+from checksmith.outputs.checkoutput import CheckOutput
 
 
 @pytest.fixture
@@ -129,7 +129,7 @@ def test_a_configuration_error_reaches_stderr_whatever_the_format(
 
 def test_emit_renders_json_when_asked(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(typer.Exit):
-        _emit(Check(), OutputFormat.JSON)
+        _emit(CheckOutput(), OutputFormat.JSON)
 
     assert json.loads(capsys.readouterr().out) == {"results": []}
 
@@ -138,7 +138,7 @@ def test_emit_renders_a_table_by_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(typer.Exit):
-        _emit(Check(results=(ToolResult(name="ruff"),)), OutputFormat.TEXT)
+        _emit(CheckOutput(results=(ToolResult(name="ruff"),)), OutputFormat.TEXT)
 
     captured = capsys.readouterr().out
     assert "Checksmith" in captured
@@ -148,7 +148,7 @@ def test_emit_renders_a_table_by_default(
 def test_emit_exits_with_the_code_its_output_implies(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    output = Check(results=(ToolResult(name="ruff", failed=True),))
+    output = CheckOutput(results=(ToolResult(name="ruff", failed=True),))
 
     with pytest.raises(typer.Exit) as raised:
         _emit(output, OutputFormat.TEXT)

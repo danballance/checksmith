@@ -9,7 +9,7 @@ from rich.table import Table
 
 from checksmith.dtos import ExitCode, ToolResult
 from checksmith.outputs.base import CliOutput
-from checksmith.outputs.check import Check
+from checksmith.outputs.checkoutput import CheckOutput
 
 
 @pytest.fixture
@@ -38,17 +38,17 @@ def results_with_one_failure() -> tuple[ToolResult, ...]:
 
 
 def test_check_is_a_cli_output() -> None:
-    assert isinstance(Check(), CliOutput)
+    assert isinstance(CheckOutput(), CliOutput)
 
 
 def test_an_empty_suite_succeeds() -> None:
-    assert Check().exit_code is ExitCode.SUCCESS
+    assert CheckOutput().exit_code is ExitCode.SUCCESS
 
 
 def test_a_suite_of_passing_tools_succeeds(
     passing_results: tuple[ToolResult, ...],
 ) -> None:
-    output = Check(results=passing_results)
+    output = CheckOutput(results=passing_results)
 
     assert output.exit_code is ExitCode.SUCCESS
 
@@ -56,20 +56,20 @@ def test_a_suite_of_passing_tools_succeeds(
 def test_a_single_failing_tool_makes_the_suite_unhealthy(
     results_with_one_failure: tuple[ToolResult, ...],
 ) -> None:
-    output = Check(results=results_with_one_failure)
+    output = CheckOutput(results=results_with_one_failure)
 
     assert output.exit_code is ExitCode.UNHEALTHY
 
 
 def test_rendering_produces_a_table() -> None:
-    assert isinstance(Check().__rich__(), Table)
+    assert isinstance(CheckOutput().__rich__(), Table)
 
 
 def test_rendering_reports_each_tool_and_its_findings(
     render: Callable[[CliOutput], str],
     results_with_one_failure: tuple[ToolResult, ...],
 ) -> None:
-    output = Check(results=results_with_one_failure)
+    output = CheckOutput(results=results_with_one_failure)
 
     rendered = render(output)
 
@@ -81,6 +81,6 @@ def test_rendering_reports_each_tool_and_its_findings(
 
 
 def test_json_round_trips() -> None:
-    output = Check(results=(ToolResult(name="ty", failed=True, findings=("bad",)),))
+    output = CheckOutput(results=(ToolResult(name="ty", failed=True, findings=("bad",)),))
 
-    assert Check.model_validate_json(output.model_dump_json()) == output
+    assert CheckOutput.model_validate_json(output.model_dump_json()) == output

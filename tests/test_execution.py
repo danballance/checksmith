@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from checksmith.dtos import ExitCode, ToolResult
-from checksmith.execution import CheckRunner, Runner
+from checksmith.execution import Runner
 from checksmith.tools.process_spec import ProcessSpec
 from checksmith.tools.tool import ProcessTool, Tool
 
@@ -49,13 +49,6 @@ def test_runner_retains_the_tools_it_was_given(tool: ProcessTool) -> None:
     runner = Runner(tools=tools)
 
     assert runner.tools == tools
-
-
-def test_a_runner_is_a_check_runner(tool: ProcessTool) -> None:
-    """Checked statically: the annotation is the assertion."""
-    runner: CheckRunner = Runner(tools=(tool,))
-
-    assert runner is not None
 
 
 def test_every_tool_is_run_once_and_every_result_is_kept() -> None:
