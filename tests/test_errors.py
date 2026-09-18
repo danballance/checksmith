@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from checksmith.errors import (
+    CheckExecutionError,
     ChecksmithError,
     ConfigSchemaError,
     ConfigSyntaxError,
@@ -14,6 +15,17 @@ from checksmith.errors import (
 )
 
 CONFIG_PATH = Path("/workspace/project/.checksmith/checksmith.yaml")
+PROJECT_ROOT = Path("/workspace/project")
+
+
+def execution_error() -> CheckExecutionError:
+    """A check whose program was not on the machine that asked for it."""
+    return CheckExecutionError(
+        check_id="lint",
+        program="uvx",
+        working_directory=PROJECT_ROOT,
+        problem="[Errno 2] No such file or directory: 'uvx'",
+    )
 
 
 def context(*, check_id: str | None) -> DiagnosticContext:
@@ -162,3 +174,17 @@ def test_only_the_errors_checksmith_words_itself_are_configuration_errors() -> N
         ConfigSchemaError(config_path=CONFIG_PATH, violations=()),
         ConfigurationError,
     )
+    assert not isinstance(execution_error(), ConfigurationError)
+
+
+def test_an_execution_error_says_which_check_wanted_which_program_where() -> None:
+    """The operating system can name the program; only Checksmith names the check."""
+    assert str(execution_error()) == (
+        "Check 'lint': could not run uvx in /workspace/project: "
+        "[Errno 2] No such file or directory: 'uvx'"
+    )
+
+
+def test_an_execution_error_reaches_the_clis_error_boundary() -> None:
+    """A :class:`ChecksmithError`, so it prints as a diagnostic, not a crash."""
+    assert isinstance(execution_error(), ChecksmithError)

@@ -1,12 +1,14 @@
 """One command: how it is run, and how the program's own output is read."""
 
 import logging
+import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from pathlib import Path
 
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CommandName
+from checksmith.errors import CheckExecutionError
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +38,54 @@ class Command(ABC):
         instance serve every check that names it. The project root comes
         separately because it belongs to the config as a whole.
 
-        Not implemented yet. Returning a passing :class:`CheckResult` would be
-        worse than failing: it would report success for a check that never ran.
+        A vector and no shell, so the arguments a config file wrote reach the
+        program exactly as written --- a path containing a space needs no
+        escaping and gets none. ``stdin`` is closed rather than inherited: a
+        tool that stops to ask a question should fail, not hang a gate that
+        nobody is watching.
         """
         logger.debug("%s argv=%s cwd=%s", check.id, check.argv, project_root)
-        raise NotImplementedError(
-            f"Check execution is not implemented yet; cannot run check: {check.id}"
+        try:
+            completed = subprocess.run(
+                check.argv,
+                # Stringified here rather than left to the standard library:
+                # when the root is the thing that is missing, the operating
+                # system quotes what it was handed, and a ``PosixPath(...)``
+                # repr in a diagnostic is Checksmith's noise, not the OS's.
+                cwd=str(project_root),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                # No ``errors`` override: a tool emitting bytes that are not
+                # UTF-8 fails here rather than having its output patched into
+                # something ``process_response`` would go on to misread.
+                encoding="utf-8",
+                # A linter exits nonzero for the ordinary reason that it found
+                # something. Raising would make every failing check an error,
+                # which is the distinction ``process_response`` exists to draw.
+                check=False,
+            )
+        except OSError as error:
+            # The program is missing, or the root is. Either way nothing ran,
+            # and the check's id is the only thing that says which one.
+            raise CheckExecutionError(
+                check_id=check.id,
+                program=check.argv[0],
+                working_directory=project_root,
+                problem=str(error),
+            ) from error
+        logger.debug(
+            "%s exited %d, stdout %d chars, stderr %d chars",
+            check.id,
+            completed.returncode,
+            len(completed.stdout),
+            len(completed.stderr),
+        )
+        return self.process_response(
+            check_id=check.id,
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
         )
 
     @abstractmethod

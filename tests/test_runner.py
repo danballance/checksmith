@@ -9,6 +9,7 @@ from checksmith.commands.command import Command
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CommandName, ExitCode, PackageType
 from checksmith.runner import Runner
+from tests.conftest import FakeProcesses
 
 PROJECT_ROOT = Path("/workspace/project")
 
@@ -136,10 +137,15 @@ def test_every_check_runs_in_the_one_project_root(
     assert recorder.roots == [PROJECT_ROOT, PROJECT_ROOT]
 
 
-def test_a_check_that_cannot_run_stops_the_whole_run(
+def test_a_check_whose_output_cannot_be_read_stops_the_whole_run(
     checks: tuple[Check, ...],
+    processes: FakeProcesses,
 ) -> None:
-    """Execution is unimplemented, so this is how a real suite behaves today."""
+    """Reading is unimplemented, so this is how a real suite behaves today.
+
+    The first check stops it, so the second never starts: a run reports what
+    every check found, or it reports why it could not.
+    """
     with pytest.raises(NotImplementedError) as raised:
         Runner(
             checks=checks,
@@ -147,6 +153,7 @@ def test_a_check_that_cannot_run_stops_the_whole_run(
             project_root=PROJECT_ROOT,
         ).check()
 
+    assert len(processes.started) == 1
     assert "lint" in str(raised.value)
 
 

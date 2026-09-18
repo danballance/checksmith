@@ -1,10 +1,12 @@
 """Shared fixtures for the Checksmith test suite."""
 
 import logging
-from collections.abc import Iterator
+import subprocess
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel, ConfigDict
 
 from checksmith.logs import LOGGER_NAME
 
@@ -69,3 +71,71 @@ def config_tree(tmp_path: Path) -> Path:
 def config_path(config_tree: Path) -> Path:
     """The config file inside :func:`config_tree`, which every run must name."""
     return config_tree / ".checksmith" / "checksmith.yaml"
+
+
+class StartedProcess(BaseModel):
+    """One process a command started, as it asked for it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    argv: tuple[str, ...]
+    cwd: Path
+    """Recorded as a path, though the standard library is handed a string."""
+
+    stdin: int
+
+
+class FakeProcesses:
+    """Every process the code under test started, and the answer they all get."""
+
+    def __init__(self) -> None:
+        self.started: list[StartedProcess] = []
+        """One entry per call, in the order the calls were made."""
+
+        self.exit_code = 0
+        self.stdout = ""
+        self.stderr = ""
+        """What every process reports. A test that wants another sets them."""
+
+        self.refusal: OSError | None = None
+        """Set to refuse to start at all, as an absent program would."""
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        stdin: int,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        """Stand in for :func:`subprocess.run`, recording rather than starting.
+
+        The signature is itself the assertion: a caller that stopped passing any
+        one of these explicitly fails here with a ``TypeError`` rather than
+        quietly taking the standard library's default for it.
+        """
+        if self.refusal is not None:
+            # Nothing is recorded: a process that never started is not one.
+            raise self.refusal
+        self.started.append(StartedProcess(argv=tuple(argv), cwd=cwd, stdin=stdin))
+        return subprocess.CompletedProcess(
+            args=list(argv),
+            returncode=self.exit_code,
+            stdout=self.stdout,
+            stderr=self.stderr,
+        )
+
+
+@pytest.fixture
+def processes(monkeypatch: pytest.MonkeyPatch) -> FakeProcesses:
+    """No test starts a real process; every test can see how one was asked for.
+
+    Without this, any test reaching :meth:`Command.run` would fetch a tool from
+    the network and run it --- slow, and answering differently on every machine.
+    """
+    fake = FakeProcesses()
+    monkeypatch.setattr(subprocess, "run", fake.run)
+    return fake

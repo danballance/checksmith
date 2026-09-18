@@ -6,8 +6,9 @@ rather than labelling it with an implementation class name.
 
 A problem Checksmith worked out for itself is a :class:`ConfigurationError`,
 which pairs a summary with the field it belongs to. A config file that could not be
-read is not: PyYAML and the operating system write their own diagnostics, and
-those already say where the trouble is.
+read is not, and neither is a check whose process never started: PyYAML and the
+operating system write those diagnostics, and they already say where the trouble
+is.
 
 The rendered shape is::
 
@@ -141,3 +142,33 @@ class ConfigSchemaError(ConfigurationError):
             ),
         )
 
+
+class CheckExecutionError(ChecksmithError):
+    """A check's process could not be started.
+
+    Deliberately not a :class:`ConfigurationError`, for both of the reasons
+    :class:`ConfigSyntaxError` is not. The wording is the operating system's ---
+    an absent ``uvx`` is a machine that is not set up, not a line anybody can
+    edit --- and the command that raises this never sees the config file, so
+    there is no path for the shared renderer to append.
+
+    What the operating system cannot say is which check wanted the program. One
+    config may declare several, and they may share it.
+    """
+
+    def __init__(
+        self,
+        *,
+        check_id: str,
+        program: str,
+        working_directory: Path,
+        problem: str,
+    ) -> None:
+        self.check_id = check_id
+        self.program = program
+        self.working_directory = working_directory
+        self.problem = problem
+        super().__init__(
+            f"Check '{check_id}': could not run {program} "
+            f"in {working_directory}: {problem}"
+        )

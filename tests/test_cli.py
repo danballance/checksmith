@@ -23,6 +23,7 @@ from checksmith.dtos import CheckResult, ExitCode
 from checksmith.errors import ConfigSyntaxError
 from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
+from tests.conftest import FakeProcesses
 
 
 @pytest.fixture
@@ -63,12 +64,17 @@ def test_check_requires_a_config_to_be_named(cli_runner: CliRunner) -> None:
     assert "--config" in result.stderr
 
 
-def test_check_loads_the_named_config_and_reaches_execution(
+def test_check_loads_the_named_config_and_runs_what_it_declares(
     cli_runner: CliRunner,
     config_tree: Path,
+    processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Configuration succeeds; running the checks is the part still missing."""
+    """Configuration and execution succeed; reading the output is what is missing.
+
+    The working directory the tool was started in is the resolved project root,
+    which is the whole of that resolution proved from the command line in.
+    """
     monkeypatch.chdir(config_tree)
 
     result = cli_runner.invoke(
@@ -76,15 +82,19 @@ def test_check_loads_the_named_config_and_reaches_execution(
         ["check", "--config", ".checksmith/checksmith.yaml"],
     )
 
+    assert processes.started[0].cwd == config_tree
     assert result.exit_code == ExitCode.ERROR
     assert "NotImplementedError" in result.stderr
-    assert "cannot run check: ruff" in result.stderr
+    assert "Reading ruff output is not implemented yet" in result.stderr
+    assert "check: ruff" in result.stderr
 
 
 def test_check_accepts_an_absolute_config_path(
     cli_runner: CliRunner,
     config_path: Path,
+    config_tree: Path,
     tmp_path: Path,
+    processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A relative path resolves from here; an absolute one ignores here."""
@@ -94,8 +104,9 @@ def test_check_accepts_an_absolute_config_path(
 
     result = cli_runner.invoke(app, ["check", "--config", str(config_path)])
 
+    assert processes.started[0].cwd == config_tree
     assert result.exit_code == ExitCode.ERROR
-    assert "cannot run check: ruff" in result.stderr
+    assert "check: ruff" in result.stderr
 
 
 def test_check_reports_a_bad_config_option_without_typers_wording(
