@@ -70,12 +70,13 @@ def test_check_loads_the_named_config_and_runs_what_it_declares(
     processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Configuration and execution succeed; reading the output is what is missing.
+    """Configure, execute, read, report --- the whole of a run, from the outside.
 
     The working directory the tool was started in is the resolved project root,
-    which is the whole of that resolution proved from the command line in.
+    which is that resolution proved from the command line in.
     """
     monkeypatch.chdir(config_tree)
+    processes.stdout = "[]"
 
     result = cli_runner.invoke(
         app,
@@ -83,10 +84,39 @@ def test_check_loads_the_named_config_and_runs_what_it_declares(
     )
 
     assert processes.started[0].cwd == config_tree
-    assert result.exit_code == ExitCode.ERROR
-    assert "NotImplementedError" in result.stderr
-    assert "Reading ruff output is not implemented yet" in result.stderr
-    assert "check: ruff" in result.stderr
+    assert result.exit_code == ExitCode.SUCCESS
+    assert "ruff" in result.stdout
+    assert "PASS" in result.stdout
+
+
+def test_a_check_that_found_something_reports_it_and_exits_unhealthy(
+    cli_runner: CliRunner,
+    config_tree: Path,
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The point of the whole program: what a tool found, under the exit code for it."""
+    monkeypatch.chdir(config_tree)
+    processes.exit_code = 1
+    processes.stdout = json.dumps(
+        [
+            {
+                "code": "F401",
+                "filename": str(config_tree / "src" / "app.py"),
+                "location": {"column": 8, "row": 1},
+                "message": "`os` imported but unused",
+            }
+        ]
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", ".checksmith/checksmith.yaml"],
+    )
+
+    assert result.exit_code == ExitCode.UNHEALTHY
+    assert "FAIL" in result.stdout
+    assert "src/app.py:1:8" in result.stdout
 
 
 def test_check_accepts_an_absolute_config_path(
@@ -101,12 +131,34 @@ def test_check_accepts_an_absolute_config_path(
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     monkeypatch.chdir(elsewhere)
+    processes.stdout = "[]"
 
     result = cli_runner.invoke(app, ["check", "--config", str(config_path)])
 
     assert processes.started[0].cwd == config_tree
+    assert result.exit_code == ExitCode.SUCCESS
+
+
+def test_a_tool_that_returns_something_unreadable_stops_the_run(
+    cli_runner: CliRunner,
+    config_tree: Path,
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ruff broken is an error, not a FAIL row: the gate has not judged anything."""
+    monkeypatch.chdir(config_tree)
+    processes.exit_code = 2
+    processes.stderr = "ruff failed\n  Cause: unknown field `nonsense_key`\n"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", ".checksmith/checksmith.yaml"],
+    )
+
     assert result.exit_code == ExitCode.ERROR
-    assert "check: ruff" in result.stderr
+    assert result.stdout == ""
+    assert "Check 'ruff': ruff exited 2" in result.stderr
+    assert "unknown field `nonsense_key`" in result.stderr
 
 
 def test_check_reports_a_bad_config_option_without_typers_wording(

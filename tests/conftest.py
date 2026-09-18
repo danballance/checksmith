@@ -43,6 +43,8 @@ checks:
       - check
       - --config
       - ./ruff.toml
+      - --output-format
+      - json
       - .
 """
 

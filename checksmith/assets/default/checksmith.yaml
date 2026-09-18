@@ -1,7 +1,7 @@
 schema_version: 1
 
 # Relative to the directory containing this config file.
-project_root: ..
+project_root: ../../..
 
 checks:
   - id: ruff
@@ -12,5 +12,7 @@ checks:
     args:
       - check
       - --config
-      - ./ruff.toml
+      - ./checksmith/assets/default/ruff.toml
+      - --output-format
+      - json
       - .

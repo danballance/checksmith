@@ -8,6 +8,7 @@ import pytest
 from checksmith.commands.command import Command
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CommandName, ExitCode, PackageType
+from checksmith.errors import CheckOutputError
 from checksmith.runner import Runner
 from tests.conftest import FakeProcesses
 
@@ -43,6 +44,7 @@ class RecordingCommand(Command):
         self,
         *,
         check_id: str,
+        project_root: Path,
         exit_code: int,
         stdout: str,
         stderr: str,
@@ -141,12 +143,12 @@ def test_a_check_whose_output_cannot_be_read_stops_the_whole_run(
     checks: tuple[Check, ...],
     processes: FakeProcesses,
 ) -> None:
-    """Reading is unimplemented, so this is how a real suite behaves today.
+    """A tool returning nothing readable is not a tool reporting a clean project.
 
     The first check stops it, so the second never starts: a run reports what
     every check found, or it reports why it could not.
     """
-    with pytest.raises(NotImplementedError) as raised:
+    with pytest.raises(CheckOutputError) as raised:
         Runner(
             checks=checks,
             commands=Command.registry(),
@@ -155,6 +157,27 @@ def test_a_check_whose_output_cannot_be_read_stops_the_whole_run(
 
     assert len(processes.started) == 1
     assert "lint" in str(raised.value)
+
+
+def test_a_whole_suite_runs_through_the_commands_checksmith_ships(
+    checks: tuple[Check, ...],
+    processes: FakeProcesses,
+) -> None:
+    """Two real checks, read by the real command, over a project with nothing wrong."""
+    processes.stdout = "[]"
+
+    output = Runner(
+        checks=checks,
+        commands=Command.registry(),
+        project_root=PROJECT_ROOT,
+    ).check()
+
+    assert len(processes.started) == 2
+    assert output.results == (
+        CheckResult(check_id="lint", failed=False, findings=()),
+        CheckResult(check_id="format", failed=False, findings=()),
+    )
+    assert output.exit_code is ExitCode.SUCCESS
 
 
 def test_a_run_with_no_checks_at_all_is_rejected() -> None:

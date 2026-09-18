@@ -1,32 +1,8 @@
-"""Errors Checksmith raises deliberately, and how they are rendered.
-
-Every error here renders itself at construction time, so ``str(error)`` is
-exactly the text a user reads: the CLI's error boundary prints it verbatim
-rather than labelling it with an implementation class name.
-
-A problem Checksmith worked out for itself is a :class:`ConfigurationError`,
-which pairs a summary with the field it belongs to. A config file that could not be
-read is not, and neither is a check whose process never started: PyYAML and the
-operating system write those diagnostics, and they already say where the trouble
-is.
-
-The rendered shape is::
-
-    The config file does not match the Checksmith schema
-      checks.0.package: Value error, a uvx package must name a version
-      in /workspace/project/.checksmith/checksmith.yaml
-
-A ``Check '<id>': `` prefix and a detail line sit above the notes when the
-raising code knows them, and are omitted when it does not. Positions are given
-as dotted field paths such as ``checks.0.package``: carrying a line and column
-for every field in the document is not worth the precision. Where PyYAML has
-already worked a position out for itself, the note quoting it says so in
-PyYAML's own words.
-"""
-
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
+
+from checksmith.dtos import CommandName
 
 
 class DiagnosticContext(BaseModel):
@@ -86,9 +62,7 @@ class ConfigurationError(ChecksmithError):
         self.summary = summary
         self.detail = detail
         self.notes = notes
-        super().__init__(
-            context.render(summary=summary, detail=detail, notes=notes)
-        )
+        super().__init__(context.render(summary=summary, detail=detail, notes=notes))
 
 
 class ConfigSyntaxError(ChecksmithError):
@@ -172,3 +146,36 @@ class CheckExecutionError(ChecksmithError):
             f"Check '{check_id}': could not run {program} "
             f"in {working_directory}: {problem}"
         )
+
+
+class CheckOutputError(ChecksmithError):
+    """A check's process ran, but its command could not read what came back.
+
+    Deliberately not a :class:`ConfigurationError`, for both of the reasons
+    :class:`ConfigSyntaxError` is not. The detail is the tool's own wording, and
+    the command that raises this never sees the config file, so there is no path
+    for the shared renderer to append.
+
+    Distinct from :class:`CheckExecutionError`, which is a process that never
+    started. This one finished and said something the command was not written to
+    read --- a ruff that could not load its own config, or a check whose
+    arguments asked for a format its command does not parse.
+
+    The summary comes from the raise site, as :class:`ConfigurationError`'s does,
+    because one command can fail to read for more than one reason and only it
+    knows which.
+    """
+
+    def __init__(
+        self,
+        *,
+        check_id: str,
+        command: CommandName,
+        summary: str,
+        problem: str,
+    ) -> None:
+        self.check_id = check_id
+        self.command = command
+        self.summary = summary
+        self.problem = problem
+        super().__init__(f"Check '{check_id}': {summary}:\n{problem}")

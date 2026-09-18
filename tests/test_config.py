@@ -599,7 +599,14 @@ def test_the_arguments_arrive_as_the_config_file_wrote_them(
 ) -> None:
     config = Config.from_path(config_path=config_path, working_directory=config_tree)
 
-    assert config.checks[0].args == ("check", "--config", "./ruff.toml", ".")
+    assert config.checks[0].args == (
+        "check",
+        "--config",
+        "./ruff.toml",
+        "--output-format",
+        "json",
+        ".",
+    )
     assert config.checks[0].package_type is PackageType.UVX
 
 

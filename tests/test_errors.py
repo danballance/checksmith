@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+from checksmith.dtos import CommandName
 from checksmith.errors import (
     CheckExecutionError,
+    CheckOutputError,
     ChecksmithError,
     ConfigSchemaError,
     ConfigSyntaxError,
@@ -25,6 +27,16 @@ def execution_error() -> CheckExecutionError:
         program="uvx",
         working_directory=PROJECT_ROOT,
         problem="[Errno 2] No such file or directory: 'uvx'",
+    )
+
+
+def output_error() -> CheckOutputError:
+    """A check whose tool ran and then said something unreadable."""
+    return CheckOutputError(
+        check_id="lint",
+        command=CommandName.RUFF,
+        summary="ruff exited 2 rather than reporting findings",
+        problem="ruff failed\n  Cause: unknown field `nonsense_key`",
     )
 
 
@@ -175,6 +187,7 @@ def test_only_the_errors_checksmith_words_itself_are_configuration_errors() -> N
         ConfigurationError,
     )
     assert not isinstance(execution_error(), ConfigurationError)
+    assert not isinstance(output_error(), ConfigurationError)
 
 
 def test_an_execution_error_says_which_check_wanted_which_program_where() -> None:
@@ -188,3 +201,23 @@ def test_an_execution_error_says_which_check_wanted_which_program_where() -> Non
 def test_an_execution_error_reaches_the_clis_error_boundary() -> None:
     """A :class:`ChecksmithError`, so it prints as a diagnostic, not a crash."""
     assert isinstance(execution_error(), ChecksmithError)
+
+
+def test_an_output_error_says_which_check_could_not_be_read_and_why() -> None:
+    """The tool's own words, under the id of the check that ran it."""
+    assert str(output_error()) == (
+        "Check 'lint': ruff exited 2 rather than reporting findings:\n"
+        "ruff failed\n"
+        "  Cause: unknown field `nonsense_key`"
+    )
+
+
+def test_an_output_error_reaches_the_clis_error_boundary() -> None:
+    """A :class:`ChecksmithError`, so it prints as a diagnostic, not a crash."""
+    assert isinstance(output_error(), ChecksmithError)
+
+
+def test_an_output_error_is_not_an_execution_error() -> None:
+    """A process that ran and one that never started are separate diagnoses."""
+    assert not isinstance(output_error(), CheckExecutionError)
+    assert not isinstance(execution_error(), CheckOutputError)

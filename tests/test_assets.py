@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from checksmith.config import Config
-from checksmith.dtos import PackageType
+from checksmith.dtos import CommandName, PackageType
 
 
 @pytest.fixture
@@ -81,8 +81,28 @@ def test_the_starter_config_builds_a_ruff_invocation(
         "check",
         "--config",
         "./ruff.toml",
+        "--output-format",
+        "json",
         ".",
     )
+
+
+def test_the_starter_config_asks_for_the_output_its_command_reads(
+    default_assets: Path,
+) -> None:
+    """A config must name a command whose adapter reads what its args produce.
+
+    Checksmith appends nothing to the vector, so the starter has to carry the
+    switch itself, and this is what pairs it with :class:`RuffCommand`.
+    """
+    config = Config.from_path(
+        config_path=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+
+    assert config.checks[0].command is CommandName.RUFF
+    assert "--output-format" in config.checks[0].args
+    assert "json" in config.checks[0].args
 
 
 def test_the_starter_check_uses_the_python_package_type(default_assets: Path) -> None:
