@@ -19,7 +19,7 @@ from checksmith.cli import (
     _emit,
     app,
 )
-from checksmith.dtos import ExitCode, ToolResult
+from checksmith.dtos import CheckResult, ExitCode
 from checksmith.errors import ConfigSyntaxError
 from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
@@ -145,7 +145,7 @@ def test_emit_renders_a_table_by_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(typer.Exit):
-        _emit(CheckOutput(results=(ToolResult(name="ruff"),)), OutputFormat.TEXT)
+        _emit(CheckOutput(results=(CheckResult(check_id="ruff"),)), OutputFormat.TEXT)
 
     captured = capsys.readouterr().out
     assert "Checksmith" in captured
@@ -155,7 +155,7 @@ def test_emit_renders_a_table_by_default(
 def test_emit_exits_with_the_code_its_output_implies(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    output = CheckOutput(results=(ToolResult(name="ruff", failed=True),))
+    output = CheckOutput(results=(CheckResult(check_id="ruff", failed=True),))
 
     with pytest.raises(typer.Exit) as raised:
         _emit(output, OutputFormat.TEXT)

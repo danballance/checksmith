@@ -13,8 +13,7 @@ from pathlib import Path
 import pytest
 
 from checksmith.config import Config
-from checksmith.dtos import RunnerName
-from checksmith.tools.tool_factory import ToolFactory
+from checksmith.dtos import PackageType
 
 
 @pytest.fixture
@@ -44,7 +43,8 @@ def test_the_starter_config_loads_through_the_real_loader(
         working_directory=default_assets,
     )
 
-    assert config.project_root == Path("..")
+    # ``project_root: ..`` resolves against the directory the config sits in.
+    assert config.project_root == default_assets.parent
     assert tuple(check.id for check in config.checks) == ("ruff",)
 
 
@@ -73,9 +73,7 @@ def test_the_starter_config_builds_a_ruff_invocation(
         working_directory=default_assets,
     )
 
-    tool = ToolFactory(config=config).get_tools()[0]
-
-    assert tool.spec.argv == (
+    assert config.checks[0].argv == (
         "uvx",
         "--from",
         "ruff==0.16.7",
@@ -87,13 +85,13 @@ def test_the_starter_config_builds_a_ruff_invocation(
     )
 
 
-def test_the_starter_check_uses_the_python_runner(default_assets: Path) -> None:
+def test_the_starter_check_uses_the_python_package_type(default_assets: Path) -> None:
     config = Config.from_path(
         config_path=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
-    assert config.checks[0].runner is RunnerName.UVX
+    assert config.checks[0].package_type is PackageType.UVX
 
 
 def test_the_starter_ruff_configuration_is_a_standalone_one(

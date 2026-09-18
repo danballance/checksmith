@@ -2,7 +2,6 @@
 
 import logging
 import os
-import re
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Self, cast
@@ -17,28 +16,28 @@ from pydantic import (
     field_validator,
 )
 
-from checksmith.dtos import RunnerName
+from checksmith.dtos import CommandName, PackageType
 from checksmith.errors import (
     ConfigSchemaError,
     ConfigSyntaxError,
     SchemaViolation,
 )
-from checksmith.runners import PackageRunner
+from checksmith.packages import Package
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_SCHEMA_VERSION: Final = 1
 
-TOKEN: Final = re.compile(r"\{files\.(?P<name>[A-Za-z_][A-Za-z0-9_-]*)\}")
-
 
 class Check(BaseModel):
-    """A single check, with its paths absolute and its file references substituted."""
+    """A single check: one configuration of one command.
+    Two checks may name the same command and differ only in their arguments.
+    """
 
     id: str = Field(min_length=1)
-    runner: RunnerName
+    package_type: PackageType
     package: str = Field(min_length=1)
-    command: str = Field(min_length=1)
+    command: CommandName
     args: tuple[str, ...]
 
     @field_validator("package")
@@ -46,13 +45,27 @@ class Check(BaseModel):
     def _package_names_a_version(cls, value: str, info: ValidationInfo) -> str:
         # A field validator, not a model validator, so the complaint lands on
         # ``package`` --- the line a user has to edit.
-        runner = info.data.get("runner")
-        if runner is None:
-            # ``runner`` itself did not validate; that is the error worth fixing.
+        package_type = info.data.get("package_type")
+        if package_type is None:
+            # ``package_type`` did not validate; that is the error worth fixing.
             return value
-        runner = cast(RunnerName, runner)
-        PackageRunner.from_name(name=runner).validate_package(package=value)
+        package_type = cast(PackageType, package_type)
+        Package.from_name(name=package_type).validate_package(package=value)
         return value
+
+    @property
+    def argv(self) -> tuple[str, ...]:
+        """The vector this check runs, with ``uvx`` or ``npx`` at position zero.
+
+        An argument *vector*, never a command string: nothing here is ever
+        handed to a shell, so a path containing a space or a quote needs no
+        escaping and gets none.
+        """
+        return Package.from_name(name=self.package_type).build_argv(
+            package=self.package,
+            command=self.command.value,
+            arguments=self.args,
+        )
 
 
 class Config(BaseModel):
@@ -68,6 +81,29 @@ class Config(BaseModel):
                 f"schema_version must be {SUPPORTED_SCHEMA_VERSION}, got {value}"
             )
         return value
+
+    @field_validator("project_root")
+    @classmethod
+    def _resolves_against_the_config_directory(
+        cls,
+        value: Path,
+        info: ValidationInfo,
+    ) -> Path:
+        """Resolve the project root against the directory holding the config file.
+
+        Everything inside a config file is relative to that file, so a root of
+        ``..`` names the directory above ``.checksmith``, not the directory
+        above wherever the user happened to be located.
+        """
+        config_path = info.context
+        if not isinstance(config_path, Path):
+            # Not a config error, so not a ``ValueError``: a complaint against
+            # ``project_root`` would send a user to edit a line that is fine.
+            raise TypeError(
+                "Config must be validated with the config path as context; "
+                "build one with Config.from_mapping"
+            )
+        return Path(os.path.normpath(config_path.parent / value))
 
     @field_validator("checks")
     @classmethod
@@ -157,9 +193,9 @@ class Config(BaseModel):
             # Per check rather than one dump of the model: this is the level a
             # surprising run is diagnosed at --- which package, which argv.
             logger.debug(
-                "check %s: runner=%s package=%s command=%s args=%s",
+                "check %s: package_type=%s package=%s command=%s args=%s",
                 check.id,
-                check.runner,
+                check.package_type,
                 check.package,
                 check.command,
                 check.args,

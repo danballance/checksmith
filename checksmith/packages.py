@@ -5,39 +5,25 @@ from typing import Final
 import nodesemver
 from packaging.requirements import InvalidRequirement, Requirement
 
-from checksmith.dtos import RunnerName
+from checksmith.dtos import PackageType
 
 logger = logging.getLogger(__name__)
 
 
-class PackageRunner(ABC):
+class Package(ABC):
     """How one kind of package is named, and how it is invoked.
 
-    Implementations are stateless, so one shared instance per runner is enough.
+    Implementations are stateless, so one shared instance per type is enough.
     """
 
     @property
     @abstractmethod
-    def name(self) -> RunnerName:
-        """The config value that selects this runner."""
+    def name(self) -> PackageType:
+        pass
 
     @abstractmethod
     def validate_package(self, *, package: str) -> None:
-        """Raise if ``package`` is not one package at a constrained version.
-
-        A range is a constraint; silence is not. ``ruff>=0.14,<0.15`` says
-        something the ecosystem's resolver can honour tomorrow as well as today,
-        while a bare ``ruff`` says only "whatever you have", which is the one
-        answer a deterministic gate cannot use.
-
-        Raise a plain :class:`ValueError`, never a ``ChecksmithError``. This runs
-        inside a Pydantic field validator, which turns a ``ValueError`` into one
-        violation among however many others the config file has; anything else
-        escapes validation and costs the user the rest of the report.
-
-        Nothing here contacts a registry. Whether ``ruff==0.16.7`` exists is the
-        runner's problem; whether it is well formed is Checksmith's.
-        """
+        pass
 
     @abstractmethod
     def build_argv(
@@ -47,33 +33,25 @@ class PackageRunner(ABC):
         command: str,
         arguments: tuple[str, ...],
     ) -> tuple[str, ...]:
-        """Assemble the vector that runs ``command`` out of ``package``.
-
-        ``package`` is passed through exactly as the config file wrote it. Nothing
-        here normalises it: running a rewritten specification would mean the
-        failing command a user is shown is not the one their config file names.
-
-        Takes strings rather than a resolved check so that this package depends
-        on nothing else in Checksmith.
-        """
+        """Assemble the vector that runs ``command`` out of ``package``."""
 
     @classmethod
-    def from_name(cls, name: str | RunnerName) -> PackageRunner:
-        """Return the one runner that answers to ``name``.
+    def from_name(cls, name: str | PackageType) -> Package:
+        """Return the one package type that answers to ``name``.
 
         A ``match`` rather than a mapping lookup: a type checker proves this covers
-        every member of :class:`RunnerName`, so adding a third runner is an error
+        every member of :class:`PackageType`, so adding a third type is an error
         reported here at check time rather than a ``KeyError`` in front of a user.
         """
         match name:
-            case RunnerName.UVX.value:
-                return UvxRunner()
-            case RunnerName.NPX.value:
-                return NpxRunner()
-            case RunnerName.UVX:
-                return UvxRunner()
-            case RunnerName.NPX:
-                return NpxRunner()
+            case PackageType.UVX.value:
+                return UvxPackage()
+            case PackageType.NPX.value:
+                return NpxPackage()
+            case PackageType.UVX:
+                return UvxPackage()
+            case PackageType.NPX:
+                return NpxPackage()
             case _:
                 raise ValueError("Name not recognised:", name)
 
@@ -81,21 +59,21 @@ class PackageRunner(ABC):
 ANY_VERSION: Final = "*"
 
 
-class NpxRunner(PackageRunner):
+class NpxPackage(Package):
     """An npm package, named as ``name@range``."""
 
     @property
-    def name(self) -> RunnerName:
-        return RunnerName.NPX
+    def name(self) -> PackageType:
+        return PackageType.NPX
 
     def validate_package(self, *, package: str) -> None:
         """Reject anything that is not a name at a constrained range.
 
         The name half is npm's to judge, not Checksmith's: duplicating that
         grammar here only ages against it, and a name npm refuses fails loudly
-        on the first run. Nothing is handed to a shell --- see
-        :mod:`checksmith.tools.process_spec` --- so an odd name is not a
-        hazard either, just a package that will not install.
+        on the first run. Nothing is handed to a shell --- a check resolves to
+        an argument vector, see :attr:`checksmith.config.Check.argv` --- so an
+        odd name is not a hazard either, just a package that will not install.
 
         ``rpartition`` reads the last ``@`` as the separator, which is right for
         every well-formed specification, scoped or not. Its one weak spot is
@@ -138,12 +116,12 @@ class NpxRunner(PackageRunner):
         return argv
 
 
-class UvxRunner(PackageRunner):
+class UvxPackage(Package):
     """A Python package, named as a PEP 508 requirement."""
 
     @property
-    def name(self) -> RunnerName:
-        return RunnerName.UVX
+    def name(self) -> PackageType:
+        return PackageType.UVX
 
     def validate_package(self, *, package: str) -> None:
         """Reject anything that is not a PEP 508 requirement with a version.

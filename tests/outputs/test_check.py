@@ -7,7 +7,7 @@ import pytest
 from rich.console import Console
 from rich.table import Table
 
-from checksmith.dtos import ExitCode, ToolResult
+from checksmith.dtos import CheckResult, ExitCode
 from checksmith.outputs.base import CliOutput
 from checksmith.outputs.checkoutput import CheckOutput
 
@@ -25,15 +25,15 @@ def render() -> Callable[[CliOutput], str]:
 
 
 @pytest.fixture
-def passing_results() -> tuple[ToolResult, ...]:
-    return (ToolResult(name="ruff"), ToolResult(name="ty"))
+def passing_results() -> tuple[CheckResult, ...]:
+    return (CheckResult(check_id="ruff"), CheckResult(check_id="ty"))
 
 
 @pytest.fixture
-def results_with_one_failure() -> tuple[ToolResult, ...]:
+def results_with_one_failure() -> tuple[CheckResult, ...]:
     return (
-        ToolResult(name="ruff"),
-        ToolResult(name="ty", failed=True, findings=("x.py:1 bad type",)),
+        CheckResult(check_id="ruff"),
+        CheckResult(check_id="ty", failed=True, findings=("x.py:1 bad type",)),
     )
 
 
@@ -45,16 +45,16 @@ def test_an_empty_suite_succeeds() -> None:
     assert CheckOutput().exit_code is ExitCode.SUCCESS
 
 
-def test_a_suite_of_passing_tools_succeeds(
-    passing_results: tuple[ToolResult, ...],
+def test_a_suite_of_passing_checks_succeeds(
+    passing_results: tuple[CheckResult, ...],
 ) -> None:
     output = CheckOutput(results=passing_results)
 
     assert output.exit_code is ExitCode.SUCCESS
 
 
-def test_a_single_failing_tool_makes_the_suite_unhealthy(
-    results_with_one_failure: tuple[ToolResult, ...],
+def test_a_single_failing_check_makes_the_suite_unhealthy(
+    results_with_one_failure: tuple[CheckResult, ...],
 ) -> None:
     output = CheckOutput(results=results_with_one_failure)
 
@@ -65,9 +65,9 @@ def test_rendering_produces_a_table() -> None:
     assert isinstance(CheckOutput().__rich__(), Table)
 
 
-def test_rendering_reports_each_tool_and_its_findings(
+def test_rendering_reports_each_check_and_its_findings(
     render: Callable[[CliOutput], str],
-    results_with_one_failure: tuple[ToolResult, ...],
+    results_with_one_failure: tuple[CheckResult, ...],
 ) -> None:
     output = CheckOutput(results=results_with_one_failure)
 
@@ -81,6 +81,6 @@ def test_rendering_reports_each_tool_and_its_findings(
 
 
 def test_json_round_trips() -> None:
-    output = CheckOutput(results=(ToolResult(name="ty", failed=True, findings=("bad",)),))
+    output = CheckOutput(results=(CheckResult(check_id="ty", failed=True, findings=("bad",)),))
 
     assert CheckOutput.model_validate_json(output.model_dump_json()) == output

@@ -2,8 +2,8 @@
 
 These live here so that a module can reference one without importing a module
 that imports it back: ``ExitCode`` is used by the output models and by the CLI
-that renders them, and ``ToolResult`` is produced by a tool and consumed by the
-output that displays it.
+that renders them, and ``CheckResult`` is produced by a command and consumed by
+the output that displays it.
 """
 
 from enum import IntEnum, StrEnum
@@ -24,11 +24,11 @@ class ExitCode(IntEnum):
     """Checksmith could not complete the operation."""
 
 
-class ToolResult(BaseModel):
-    """Outcome of running a single configured tool."""
+class CheckResult(BaseModel):
+    """Outcome of running a single configured check."""
 
-    name: str
-    """Name of the tool that was run."""
+    check_id: str
+    """The check's id, as the config file declares it."""
 
     failed: bool = False
     """Whether the tool reported a coding standard violation."""
@@ -37,11 +37,18 @@ class ToolResult(BaseModel):
     """Human-readable descriptions of what the tool reported."""
 
 
-class RunnerName(StrEnum):
-    """How a check's package is fetched and executed."""
+class PackageType(StrEnum):
+    """Which ecosystem a check's package comes from."""
 
     UVX = "uvx"
     """A Python package, run through ``uvx``."""
 
     NPX = "npx"
     """An npm package, run through ``npx``."""
+
+
+class CommandName(StrEnum):
+    """Which command a check configures, and so which reads its output."""
+
+    RUFF = "ruff"
+    """Ruff, a Python linter and formatter."""

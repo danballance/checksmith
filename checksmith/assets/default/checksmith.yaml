@@ -5,7 +5,7 @@ project_root: ..
 
 checks:
   - id: ruff
-    runner: uvx
+    package_type: uvx
     package: "ruff==0.16.7"
     command: ruff
 

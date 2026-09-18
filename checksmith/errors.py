@@ -111,7 +111,7 @@ class SchemaViolation(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     field: str
-    """Dotted path of the offending field, such as ``checks.0.runner``."""
+    """Dotted path of the offending field, such as ``checks.0.package_type``."""
 
     message: str
     """What is wrong with it, in Pydantic's words."""

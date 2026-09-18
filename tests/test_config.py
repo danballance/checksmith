@@ -8,8 +8,8 @@ from typing import Any
 
 import pytest
 
-from checksmith.config import Config
-from checksmith.dtos import RunnerName
+from checksmith.config import Check, Config
+from checksmith.dtos import PackageType
 from checksmith.errors import ConfigSchemaError, ConfigSyntaxError
 
 CONFIG_PATH = Path("/project/.checksmith/checksmith.yaml")
@@ -19,7 +19,7 @@ def check(**overrides: Any) -> dict[str, Any]:
     """A minimal valid check, with fields replaced or removed by keyword."""
     body: dict[str, Any] = {
         "id": "ruff",
-        "runner": "uvx",
+        "package_type": "uvx",
         "package": "ruff==0.16.7",
         "command": "ruff",
         "args": ["check"],
@@ -83,7 +83,7 @@ schema_version: 1
 project_root: ..
 checks:
   - id: ruff
-    runner: uvx
+    package_type: uvx
     package: "ruff==0.16.7"
     command: ruff
     args:
@@ -99,7 +99,7 @@ def test_a_valid_document_loads(load: Callable[[str], Config]) -> None:
 
     assert config.schema_version == 1
     assert config.checks[0].id == "ruff"
-    assert config.checks[0].runner is RunnerName.UVX
+    assert config.checks[0].package_type is PackageType.UVX
 
 
 @pytest.mark.parametrize("text", ["", "# only a comment\n", "---\n", "\n\n"])
@@ -184,6 +184,7 @@ def test_a_config_that_is_not_utf_8_is_rejected(tmp_path: Path) -> None:
 
 def test_a_duplicate_key_keeps_the_last_value(
     load: Callable[[str], Config],
+    tmp_path: Path,
 ) -> None:
     """Deliberate: rejecting duplicates was dropped as more machinery than it earned.
 
@@ -193,30 +194,7 @@ def test_a_duplicate_key_keeps_the_last_value(
     text = VALID.replace("project_root: ..\n", "project_root: ..\nproject_root: .\n")
 
     # ``.`` is the second value; ``..`` would have named a directory higher.
-    assert load(text).project_root == Path(".")
-
-
-def test_an_alias_reused_between_siblings_is_fine(
-    load: Callable[[str], Config],
-) -> None:
-    text = (
-        "schema_version: 1\n"
-        "checks:\n"
-        "  - id: first\n"
-        "    runner: uvx\n"
-        '    package: "ruff==0.16.7"\n'
-        "    command: ruff\n"
-        "    args: &shared [check]\n"
-        "  - id: second\n"
-        "    runner: uvx\n"
-        '    package: "mypy==1.18.0"\n'
-        "    command: mypy\n"
-        "    args: *shared\n"
-    )
-
-    config = load(text)
-
-    assert config.checks[0].args == config.checks[1].args == ("check",)
+    assert load(text).project_root == tmp_path
 
 
 # Schema validation
@@ -237,7 +215,7 @@ def test_checks_keep_the_order_they_are_declared_in() -> None:
     body = document(
         checks=[
             check(id="first"),
-            check(id="second", runner="npx", package="prettier@3.6.2"),
+            check(id="second", package_type="npx", package="prettier@3.6.2"),
         ]
     )
 
@@ -277,18 +255,28 @@ def test_two_checks_may_share_an_id() -> None:
     assert tuple(item.id for item in parse(body).checks) == ("ruff", "ruff")
 
 
-@pytest.mark.parametrize("runner", ["uv", "pipx", "", 1, None])
-def test_an_unsupported_runner_is_rejected(runner: Any) -> None:
-    body = document(checks=[check(runner=runner)])
+@pytest.mark.parametrize("package_type", ["uv", "pipx", "", 1, None])
+def test_an_unsupported_package_type_is_rejected(package_type: Any) -> None:
+    body = document(checks=[check(package_type=package_type)])
 
-    assert "checks.0.runner" in fields_of(reject(body))
+    assert "checks.0.package_type" in fields_of(reject(body))
 
 
-@pytest.mark.parametrize("field", ["id", "package", "command"])
+@pytest.mark.parametrize("field", ["id", "package"])
 def test_an_empty_required_string_is_rejected(field: str) -> None:
     body = document(checks=[check(**{field: ""})])
 
     assert f"checks.0.{field}" in fields_of(reject(body))
+
+
+@pytest.mark.parametrize("command", ["eslint", "Ruff", "ruff ", ""])
+def test_an_unsupported_command_is_rejected(command: str) -> None:
+    """``command`` names the class that will read the tool's output, so a tool
+    Checksmith cannot read is a config error rather than a surprise mid-run.
+    """
+    body = document(checks=[check(command=command)])
+
+    assert "checks.0.command" in fields_of(reject(body))
 
 
 @pytest.mark.parametrize("value", [1, True, None, ["a"]])
@@ -309,7 +297,7 @@ def test_arguments_are_required() -> None:
 
 
 @pytest.mark.parametrize(
-    ("runner", "package"),
+    ("package_type", "package"),
     [
         ("uvx", "ruff"),
         ("uvx", "prettier@3.6.2"),
@@ -319,14 +307,17 @@ def test_arguments_are_required() -> None:
         ("npx", "ruff==0.16.7"),
     ],
 )
-def test_a_package_that_names_no_version_is_rejected(runner: str, package: str) -> None:
-    body = document(checks=[check(runner=runner, package=package)])
+def test_a_package_that_names_no_version_is_rejected(
+    package_type: str,
+    package: str,
+) -> None:
+    body = document(checks=[check(package_type=package_type, package=package)])
 
     assert "checks.0.package" in fields_of(reject(body))
 
 
 @pytest.mark.parametrize(
-    ("runner", "package"),
+    ("package_type", "package"),
     [
         ("uvx", "ruff>=0.14,<0.15"),
         ("uvx", "mypy[faster-cache]==1.18.0"),
@@ -334,33 +325,33 @@ def test_a_package_that_names_no_version_is_rejected(runner: str, package: str) 
         ("npx", "prettier@1.2.3 || >=2.0.0"),
     ],
 )
-def test_a_package_at_a_range_is_accepted(runner: str, package: str) -> None:
+def test_a_package_at_a_range_is_accepted(package_type: str, package: str) -> None:
     """A range is a constraint, so a config file may name one instead of a pin."""
-    body = document(checks=[check(runner=runner, package=package)])
+    body = document(checks=[check(package_type=package_type, package=package)])
 
     assert parse(body).checks[0].package == package
 
 
-def test_a_package_is_checked_against_the_runner_that_will_consume_it() -> None:
-    npm = document(checks=[check(runner="npx", package="prettier@3.6.2")])
+def test_a_package_is_checked_against_the_package_type_that_will_consume_it() -> None:
+    npm = document(checks=[check(package_type="npx", package="prettier@3.6.2")])
 
     assert parse(npm).checks[0].package == "prettier@3.6.2"
 
 
-def test_an_unusable_runner_suppresses_the_package_complaint() -> None:
-    """With no runner there is no notion of a correct package; fix the runner."""
-    body = document(checks=[check(runner="pipx", package="anything at all")])
+def test_an_unusable_package_type_suppresses_the_package_complaint() -> None:
+    """With no package type there is no notion of a correct package; fix the type."""
+    body = document(checks=[check(package_type="pipx", package="anything at all")])
 
-    assert fields_of(reject(body)) == ("checks.0.runner",)
+    assert fields_of(reject(body)) == ("checks.0.package_type",)
 
 
 def test_every_violation_from_one_pass_is_reported() -> None:
-    body = document(schema_version=2, checks=[check(runner="pipx", id="")])
+    body = document(schema_version=2, checks=[check(package_type="pipx", id="")])
 
     assert set(fields_of(reject(body))) == {
         "schema_version",
         "checks.0.id",
-        "checks.0.runner",
+        "checks.0.package_type",
     }
 
 
@@ -423,14 +414,41 @@ def test_a_self_referential_document_is_rejected_without_recursing() -> None:
 # The project root
 
 
-def test_the_project_root_defaults_to_the_current_directory() -> None:
-    assert parse(document()).project_root == Path(".")
+def test_a_config_naming_no_project_root_runs_where_the_config_lives() -> None:
+    """The default ``.`` is relative to the config file, like every other path."""
+    assert parse(document()).project_root == CONFIG_PATH.parent
 
 
-@pytest.mark.parametrize("value", ["..", "./absent", "/elsewhere", "/a/b/../c"])
-def test_a_project_root_is_kept_as_the_config_file_wrote_it(value: str) -> None:
-    """Nothing is resolved or collapsed, and nothing is asked of the filesystem."""
-    assert parse(document(project_root=value)).project_root == Path(value)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("..", "/project"),
+        ("./absent", "/project/.checksmith/absent"),
+        ("/elsewhere", "/elsewhere"),
+        ("/a/b/../c", "/a/c"),
+    ],
+)
+def test_a_project_root_resolves_against_the_directory_holding_the_config(
+    value: str,
+    expected: str,
+) -> None:
+    """Everything in a config file is relative to that file, this included.
+
+    Resolved lexically: ``..`` is collapsed without following symlinks, an
+    absolute root survives untouched, and a directory that is not there still
+    resolves --- nothing is asked of the filesystem.
+    """
+    assert parse(document(project_root=value)).project_root == Path(expected)
+
+
+def test_a_config_built_without_the_path_as_context_is_refused() -> None:
+    """There is nothing to resolve a root against, so the root would be a guess.
+
+    A ``TypeError`` rather than a schema violation: this is a caller building a
+    ``Config`` outside ``from_mapping``, not a line anybody can fix in YAML.
+    """
+    with pytest.raises(TypeError, match="Config.from_mapping"):
+        Config.model_validate(document())
 
 
 # Arguments
@@ -480,6 +498,44 @@ def test_an_argument_containing_spaces_stays_one_argument() -> None:
     assert len(resolved) == 1
 
 
+# The argument vector
+
+
+def resolved(**overrides: Any) -> Check:
+    """One check, built the only way a check can be built."""
+    return parse(document(checks=[check(**overrides)])).checks[0]
+
+
+def test_a_uvx_check_builds_the_documented_vector() -> None:
+    assert resolved(args=["check", "--config", "./ruff.toml", "."]).argv == (
+        "uvx",
+        "--from",
+        "ruff==0.16.7",
+        "ruff",
+        "check",
+        "--config",
+        "./ruff.toml",
+        ".",
+    )
+
+
+def test_a_check_with_no_arguments_still_builds_a_runnable_vector() -> None:
+    assert resolved(args=[]).argv == ("uvx", "--from", "ruff==0.16.7", "ruff")
+
+
+def test_an_argument_containing_spaces_stays_one_element() -> None:
+    """The vector is never joined into a string, so nothing needs quoting."""
+    vector = resolved(args=["--config", "/my project/ruff.toml"]).argv
+
+    assert vector[-1] == "/my project/ruff.toml"
+
+
+def test_the_vector_is_derived_rather_than_declared() -> None:
+    """A property, not a field: the config file's schema must not grow one."""
+    assert "argv" not in Check.model_fields
+    assert "argv" not in resolved().model_dump()
+
+
 # Loading from a path
 
 
@@ -491,7 +547,7 @@ def test_a_relative_option_resolves_against_the_working_directory(
         working_directory=config_tree,
     )
 
-    assert config.project_root == Path("..")
+    assert config.project_root == config_tree
     assert tuple(item.id for item in config.checks) == ("ruff",)
 
 
@@ -522,7 +578,7 @@ def test_a_config_that_declares_no_project_root_loads(
         "schema_version: 1\n"
         "checks:\n"
         "  - id: ruff\n"
-        "    runner: uvx\n"
+        "    package_type: uvx\n"
         '    package: "ruff==0.16.7"\n'
         "    command: ruff\n"
         '    args: ["check", "--config", "./ruff.toml", "."]\n',
@@ -534,7 +590,7 @@ def test_a_config_that_declares_no_project_root_loads(
         working_directory=tmp_path,
     )
 
-    assert config.project_root == Path(".")
+    assert config.project_root == tmp_path
 
 
 def test_the_arguments_arrive_as_the_config_file_wrote_them(
@@ -544,7 +600,7 @@ def test_the_arguments_arrive_as_the_config_file_wrote_them(
     config = Config.from_path(config_path=config_path, working_directory=config_tree)
 
     assert config.checks[0].args == ("check", "--config", "./ruff.toml", ".")
-    assert config.checks[0].runner is RunnerName.UVX
+    assert config.checks[0].package_type is PackageType.UVX
 
 
 def test_a_sibling_file_nobody_listed_does_not_become_a_check(

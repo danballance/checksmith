@@ -10,14 +10,13 @@ from rich.console import Console
 from typer.core import TyperGroup
 
 from checksmith import __version__
+from checksmith.commands.command import Command
 from checksmith.config import Config
 from checksmith.dtos import ExitCode
 from checksmith.errors import ChecksmithError
-from checksmith.execution import Runner
 from checksmith.logs import configure_logging
 from checksmith.outputs.base import CliOutput
-from checksmith.tools.tool import Tool
-from checksmith.tools.tool_factory import ToolFactory
+from checksmith.runner import Runner
 
 HELP_OPTION_NAMES = ["-h", "--help"]
 CONTEXT_SETTINGS = {"help_option_names": HELP_OPTION_NAMES}
@@ -191,9 +190,11 @@ def check(
         config_path=config_path,
         working_directory=Path.cwd(),
     )
-    tool_factory = ToolFactory(config=config)
-    tools: tuple[Tool, ...] = tool_factory.get_tools()
-    runner = Runner(tools=tools)
+    runner = Runner(
+        checks=config.checks,
+        commands=Command.registry(),
+        project_root=config.project_root,
+    )
     _emit(runner.check(), fmt)
 
 

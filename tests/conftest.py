@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from checksmith.config import Config
 from checksmith.logs import LOGGER_NAME
 
 
@@ -34,7 +33,7 @@ project_root: ..
 
 checks:
   - id: ruff
-    runner: uvx
+    package_type: uvx
     package: "ruff==0.16.7"
     command: ruff
 
@@ -51,38 +50,6 @@ target-version = "py312"
 [lint]
 select = ["E", "F"]
 """
-
-
-@pytest.fixture
-def resolved_config(tmp_path: Path) -> Config:
-    """A configuration built from a document, reading nothing off the disk.
-
-    Built through the one construction path there is, so it cannot drift from
-    what a real config file produces.
-    """
-    return Config.from_mapping(
-        document={
-            "schema_version": 1,
-            "project_root": "..",
-            "checks": [
-                {
-                    "id": "ruff",
-                    "runner": "uvx",
-                    "package": "ruff==0.16.7",
-                    "command": "ruff",
-                    "args": ["check", "--config", "./ruff.toml", "."],
-                },
-                {
-                    "id": "prettier",
-                    "runner": "npx",
-                    "package": "prettier@3.6.2",
-                    "command": "prettier",
-                    "args": ["--check", "."],
-                },
-            ],
-        },
-        config_path=tmp_path / ".checksmith" / "checksmith.yaml",
-    )
 
 
 @pytest.fixture
