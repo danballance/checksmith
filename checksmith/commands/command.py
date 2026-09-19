@@ -11,7 +11,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName
+from checksmith.dtos import CheckResult, CommandName, ErrorSeverity
 from checksmith.errors import CheckExecutionError, CheckOutputError
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,13 @@ class Command(ABC):
                 working_directory=project_root,
                 problem=str(error),
             ) from error
+        except UnicodeDecodeError as error:
+            raise CheckOutputError(
+                check_id=check.id,
+                command=self.name,
+                summary=f"{self.name} did not return UTF-8 output",
+                problem=str(error),
+            ) from error
         logger.debug(
             "%s exited %d, stdout %d chars, stderr %d chars",
             check.id,
@@ -136,6 +143,8 @@ class Command(ABC):
         match name:
             case CommandName.RUFF:
                 return RuffCommand()
+            case CommandName.SEMGREP:
+                return SemgrepCommand()
 
     @classmethod
     def registry(cls) -> Mapping[CommandName, Command]:
@@ -245,8 +254,8 @@ class RuffCommand(Command):
             check_id=check_id,
             # The findings are the report. Separating a report from a failure
             # was the exit code's whole job here, and it has done it.
-            failed=len(findings) > 0,
-            findings=findings,
+            severity=ErrorSeverity.FAILURE if findings else None,
+            messages=findings,
         )
 
     def finding(self, *, diagnostic: RuffDiagnostic, project_root: Path) -> str:
@@ -260,3 +269,96 @@ class RuffCommand(Command):
         code = "" if diagnostic.code is None else f" {diagnostic.code}"
         location = diagnostic.location
         return f"{path}:{location.row}:{location.column}{code} {diagnostic.message}"
+
+
+class SemgrepLocation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    line: int
+    col: int
+
+
+class SemgrepMessage(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    message: str
+
+
+class SemgrepDiagnostic(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    check_id: str
+    path: Path
+    start: SemgrepLocation
+    extra: SemgrepMessage
+
+
+class SemgrepReport(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    results: tuple[SemgrepDiagnostic, ...]
+    errors: tuple[SemgrepMessage, ...]
+
+
+SEMGREP_REPORTED: Final = frozenset({0, 1})
+
+
+class SemgrepCommand(Command):
+    @property
+    def name(self) -> CommandName:
+        return CommandName.SEMGREP
+
+    def process_response(
+        self,
+        *,
+        check_id: str,
+        project_root: Path,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+    ) -> CheckResult:
+        if exit_code not in SEMGREP_REPORTED:
+            raise CheckOutputError(
+                check_id=check_id,
+                command=self.name,
+                summary=f"semgrep exited {exit_code} rather than reporting findings",
+                problem=stderr.strip(),
+            )
+        try:
+            report = SemgrepReport.model_validate_json(stdout)
+        except ValidationError as error:
+            raise CheckOutputError(
+                check_id=check_id,
+                command=self.name,
+                summary="semgrep did not return the JSON this command reads",
+                problem=(
+                    "The check's args must contain '--json'.\n"
+                    f"{error}\n{stderr.strip()}"
+                ).strip(),
+            ) from error
+        if report.errors:
+            raise CheckOutputError(
+                check_id=check_id,
+                command=self.name,
+                summary="semgrep reported scan errors",
+                problem="\n".join(error.message for error in report.errors),
+            )
+        findings = tuple(
+            self.finding(diagnostic=diagnostic, project_root=project_root)
+            for diagnostic in report.results
+        )
+        logger.debug("%s read %d semgrep diagnostics", check_id, len(findings))
+        return CheckResult(
+            check_id=check_id,
+            severity=ErrorSeverity.FAILURE if findings else None,
+            messages=findings,
+        )
+
+    def finding(self, *, diagnostic: SemgrepDiagnostic, project_root: Path) -> str:
+        path = os.path.relpath(
+            (project_root / diagnostic.path).resolve(), project_root.resolve()
+        )
+        return (
+            f"{path}:{diagnostic.start.line}:{diagnostic.start.col}"
+            f" {diagnostic.check_id} {diagnostic.extra.message}"
+        )

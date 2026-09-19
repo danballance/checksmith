@@ -24,17 +24,20 @@ class ExitCode(IntEnum):
     """Checksmith could not complete the operation."""
 
 
+class ErrorSeverity(StrEnum):
+    FAILURE = "failure"
+    ERROR = "error"
+
+
 class CheckResult(BaseModel):
     """Outcome of running a single configured check."""
 
     check_id: str
     """The check's id, as the config file declares it."""
 
-    failed: bool = False
-    """Whether the tool reported a coding standard violation."""
+    severity: ErrorSeverity | None
 
-    findings: tuple[str, ...] = ()
-    """Human-readable descriptions of what the tool reported."""
+    messages: tuple[str, ...]
 
 
 class PackageType(StrEnum):
@@ -52,3 +55,5 @@ class CommandName(StrEnum):
 
     RUFF = "ruff"
     """Ruff, a Python linter and formatter."""
+
+    SEMGREP = "semgrep"

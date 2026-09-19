@@ -16,3 +16,17 @@ checks:
       - --output-format
       - json
       - .
+
+  - id: semgrep
+    package_type: uvx
+    package: "semgrep==1.176.1"
+    command: semgrep
+
+    args:
+      - scan
+      - --config
+      - ./checksmith/assets/default/semgrep.yaml
+      - --json
+      - --error
+      - --strict
+      - .

@@ -1,5 +1,6 @@
 """Tests for :mod:`checksmith.commands.command`."""
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Final
@@ -10,9 +11,10 @@ from pydantic import BaseModel, ConfigDict
 from checksmith.commands.command import (
     Command,
     RuffCommand,
+    SemgrepCommand,
 )
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName, PackageType
+from checksmith.dtos import CheckResult, CommandName, ErrorSeverity, PackageType
 from checksmith.errors import CheckExecutionError, CheckOutputError
 from tests.conftest import FakeProcesses
 
@@ -76,8 +78,8 @@ class RecordingCommand(Command):
         )
         return CheckResult(
             check_id=check_id,
-            failed=exit_code != 0,
-            findings=("read by the recorder",),
+            severity=ErrorSeverity.FAILURE if exit_code != 0 else None,
+            messages=("read by the recorder",),
         )
 
 
@@ -91,6 +93,7 @@ def test_the_base_command_cannot_be_instantiated() -> None:
     ("command_name", "expected"),
     [
         (CommandName.RUFF, RuffCommand),
+        (CommandName.SEMGREP, SemgrepCommand),
     ],
 )
 def test_the_configured_command_selects_the_class_that_handles_it(
@@ -118,9 +121,12 @@ def test_each_registered_command_answers_to_the_key_it_is_filed_under() -> None:
     assert all(command.name is name for name, command in registry.items())
 
 
-def test_a_command_holds_no_configuration_of_its_own() -> None:
+@pytest.mark.parametrize("command_name", list(CommandName))
+def test_a_command_holds_no_configuration_of_its_own(
+    command_name: CommandName,
+) -> None:
     """Statelessness is the point: one instance serves every check that names it."""
-    command = Command.for_name(name=CommandName.RUFF)
+    command = Command.for_name(name=command_name)
 
     assert vars(command) == {}
 
@@ -189,6 +195,55 @@ def test_nothing_is_read_when_nothing_ran(processes: FakeProcesses) -> None:
     assert command.read == []
 
 
+@pytest.mark.parametrize(
+    ("command_name", "package"),
+    [
+        (CommandName.RUFF, "ruff==0.16.7"),
+        (CommandName.SEMGREP, "semgrep==1.176.1"),
+    ],
+)
+def test_invalid_utf8_output_is_a_check_output_error(
+    command_name: CommandName,
+    package: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decoding_error = UnicodeDecodeError(
+        "utf-8", b"\xff", 0, 1, "invalid start byte"
+    )
+
+    def refuse_decoding(
+        argv: tuple[str, ...],
+        *,
+        cwd: str,
+        stdin: int,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        raise decoding_error
+
+    monkeypatch.setattr(subprocess, "run", refuse_decoding)
+    check = Check(
+        id="encoding-check",
+        package_type=PackageType.UVX,
+        package=package,
+        command=command_name,
+        args=(),
+    )
+
+    with pytest.raises(CheckOutputError) as raised:
+        Command.for_name(name=command_name).run(
+            check=check, project_root=PROJECT_ROOT
+        )
+
+    assert raised.value.check_id == "encoding-check"
+    assert raised.value.command is command_name
+    assert raised.value.__cause__ is decoding_error
+    assert str(decoding_error) in str(raised.value)
+    assert f"{command_name.value} did not return UTF-8 output" in str(raised.value)
+
+
 # Reading what it returned
 
 
@@ -223,7 +278,7 @@ def test_a_nonzero_exit_is_read_rather_than_raised(
 
     result = command.run(check=ruff_check(), project_root=PROJECT_ROOT)
 
-    assert result.failed is True
+    assert result.severity is ErrorSeverity.FAILURE
 
 
 def test_the_result_of_reading_the_output_is_the_result_of_the_run(
@@ -234,8 +289,8 @@ def test_the_result_of_reading_the_output_is_the_result_of_the_run(
 
     assert result == CheckResult(
         check_id="lint",
-        failed=False,
-        findings=("read by the recorder",),
+        severity=None,
+        messages=("read by the recorder",),
     )
 
 
@@ -271,7 +326,7 @@ def test_a_clean_run_of_the_real_ruff_command_passes(
 
     result = command.run(check=ruff_check(), project_root=PROJECT_ROOT)
 
-    assert result == CheckResult(check_id="lint", failed=False, findings=())
+    assert result == CheckResult(check_id="lint", severity=None, messages=())
 
 
 # Reading ruff's JSON
@@ -347,8 +402,8 @@ def test_a_clean_report_is_a_passing_check() -> None:
     """Ruff having found nothing is an empty array, and exit zero."""
     assert read_ruff(stdout="[]", exit_code=0) == CheckResult(
         check_id="lint",
-        failed=False,
-        findings=(),
+        severity=None,
+        messages=(),
     )
 
 
@@ -356,7 +411,7 @@ def test_each_diagnostic_becomes_a_finding_against_the_project_root() -> None:
     """Ruff reports absolute paths; a user thinks in paths from their project."""
     result = read_ruff(stdout=RUFF_REPORT, exit_code=1)
 
-    assert result.findings == (
+    assert result.messages == (
         "src/app.py:1:1 I001 Import block is un-sorted or un-formatted",
         "src/app.py:1:8 F401 `os` imported but unused",
     )
@@ -364,7 +419,7 @@ def test_each_diagnostic_becomes_a_finding_against_the_project_root() -> None:
 
 def test_a_report_with_diagnostics_is_a_failing_check() -> None:
     """The findings are the report, so having any of them is the failure."""
-    assert read_ruff(stdout=RUFF_REPORT, exit_code=1).failed is True
+    assert read_ruff(stdout=RUFF_REPORT, exit_code=1).severity is ErrorSeverity.FAILURE
 
 
 def test_a_diagnostic_that_names_no_rule_omits_the_code() -> None:
@@ -382,7 +437,7 @@ def test_a_diagnostic_that_names_no_rule_omits_the_code() -> None:
 
     result = read_ruff(stdout=stdout, exit_code=1)
 
-    assert result.findings == ("src/app.py:1:5 Expected an identifier",)
+    assert result.messages == ("src/app.py:1:5 Expected an identifier",)
 
 
 def test_only_the_fields_checksmith_reads_are_required() -> None:
@@ -400,7 +455,7 @@ def test_only_the_fields_checksmith_reads_are_required() -> None:
 
     result = read_ruff(stdout=stdout, exit_code=1)
 
-    assert result.findings == ("src/app.py:1:8 F401 `os` imported but unused",)
+    assert result.messages == ("src/app.py:1:8 F401 `os` imported but unused",)
 
 
 def test_a_diagnostic_missing_a_field_checksmith_reads_is_refused() -> None:
@@ -436,7 +491,7 @@ def test_a_file_outside_the_project_root_still_reads_as_a_path() -> None:
 
     result = read_ruff(stdout=stdout, exit_code=1)
 
-    assert result.findings == (
+    assert result.messages == (
         "../elsewhere/app.py:1:8 F401 `os` imported but unused",
     )
 
@@ -470,3 +525,209 @@ def test_json_of_another_shape_is_refused() -> None:
         read_ruff(stdout='{"version": "2.1.0", "runs": []}', exit_code=1)
 
     assert "--output-format json" in str(raised.value)
+
+
+SEMGREP_REPORT: Final = """\
+{
+  "version": "1.176.1",
+  "results": [
+    {
+      "check_id": "python-require-keyword-only-parameters",
+      "path": "src/app.py",
+      "start": {"line": 3, "col": 1, "offset": 12},
+      "end": {"line": 4, "col": 9, "offset": 44},
+      "extra": {
+        "message": "Declare parameters after a bare *.",
+        "severity": "ERROR",
+        "metadata": {}
+      }
+    },
+    {
+      "check_id": "python-no-variadic-parameters",
+      "path": "src/other.py",
+      "start": {"line": 8, "col": 5},
+      "extra": {"message": "Replace variadic parameters."}
+    }
+  ],
+  "errors": [],
+  "paths": {"scanned": ["src/app.py", "src/other.py"]}
+}
+"""
+
+
+def read_semgrep(*, stdout: str, exit_code: int, stderr: str) -> CheckResult:
+    return SemgrepCommand().process_response(
+        check_id="function-style",
+        project_root=PROJECT_ROOT,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_semgrep_without_findings_is_a_passing_check(exit_code: int) -> None:
+    assert read_semgrep(
+        stdout='{"results": [], "errors": []}',
+        exit_code=exit_code,
+        stderr="",
+    ) == CheckResult(check_id="function-style", severity=None, messages=())
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_semgrep_findings_fail_the_check_with_or_without_error_flag(
+    exit_code: int,
+) -> None:
+    result = read_semgrep(stdout=SEMGREP_REPORT, exit_code=exit_code, stderr="")
+
+    assert result == CheckResult(
+        check_id="function-style",
+        severity=ErrorSeverity.FAILURE,
+        messages=(
+            (
+                "src/app.py:3:1 python-require-keyword-only-parameters "
+                "Declare parameters after a bare *."
+            ),
+            (
+                "src/other.py:8:5 python-no-variadic-parameters "
+                "Replace variadic parameters."
+            ),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("reported_path", "expected_path"),
+    [
+        ("src/app.py", "src/app.py"),
+        ("./src/app.py", "src/app.py"),
+        ("/workspace/project/src/app.py", "src/app.py"),
+        ("/workspace/elsewhere.py", "../elsewhere.py"),
+    ],
+)
+def test_semgrep_paths_are_relative_to_the_scanned_project(
+    reported_path: str,
+    expected_path: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    stdout = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "function-style",
+                    "path": reported_path,
+                    "start": {"line": 1, "col": 2},
+                    "extra": {"message": "Use named parameters."},
+                }
+            ],
+            "errors": [],
+        }
+    )
+
+    result = read_semgrep(stdout=stdout, exit_code=0, stderr="")
+
+    assert result.messages == (
+        f"{expected_path}:1:2 function-style Use named parameters.",
+    )
+
+
+@pytest.mark.parametrize("exit_code", [2, 3, 4, 5, 7, -9])
+def test_semgrep_process_failures_are_errors_even_with_findings(
+    exit_code: int,
+) -> None:
+    with pytest.raises(CheckOutputError) as raised:
+        read_semgrep(
+            stdout=SEMGREP_REPORT,
+            exit_code=exit_code,
+            stderr="  Cannot load the rules configuration.\n",
+        )
+
+    assert raised.value.check_id == "function-style"
+    assert raised.value.command is CommandName.SEMGREP
+    assert f"semgrep exited {exit_code}" in str(raised.value)
+    assert "Cannot load the rules configuration." in str(raised.value)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+@pytest.mark.parametrize("has_findings", [False, True])
+def test_semgrep_scan_errors_prevent_a_completed_check(
+    exit_code: int,
+    has_findings: bool,
+) -> None:
+    stdout = (
+        SEMGREP_REPORT if has_findings else '{"results": [], "errors": []}'
+    ).replace(
+        '"errors": []',
+        '"errors": [{"message": "Could not parse src/broken.py", "code": 3}]',
+    )
+
+    with pytest.raises(CheckOutputError) as raised:
+        read_semgrep(stdout=stdout, exit_code=exit_code, stderr="")
+
+    assert raised.value.check_id == "function-style"
+    assert raised.value.command is CommandName.SEMGREP
+    assert "Could not parse src/broken.py" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "Run completed without JSON output.",
+        "[]",
+        '{"results": []}',
+        '{"errors": []}',
+        '{"results": [{"check_id": "rule"}], "errors": []}',
+        '{"results": [], "errors": [{}]}',
+    ],
+)
+def test_semgrep_unreadable_reports_explain_the_required_json_format(
+    stdout: str,
+) -> None:
+    with pytest.raises(CheckOutputError) as raised:
+        read_semgrep(stdout=stdout, exit_code=0, stderr="")
+
+    assert raised.value.check_id == "function-style"
+    assert raised.value.command is CommandName.SEMGREP
+    assert "--json" in str(raised.value)
+
+
+def test_a_semgrep_installation_failure_keeps_the_uvx_diagnostic() -> None:
+    with pytest.raises(CheckOutputError) as raised:
+        read_semgrep(
+            stdout="",
+            exit_code=1,
+            stderr="Failed to download semgrep: connection refused.\n",
+        )
+
+    assert "Failed to download semgrep: connection refused." in str(raised.value)
+
+
+def test_semgrep_runs_through_uvx_with_the_configured_arguments(
+    processes: FakeProcesses,
+) -> None:
+    processes.stdout = '{"results": [], "errors": []}'
+    check = Check(
+        id="function-style",
+        package_type=PackageType.UVX,
+        package="semgrep==1.176.1",
+        command=CommandName.SEMGREP,
+        args=("scan", "--config", ".checksmith/semgrep.yaml", "--json", "."),
+    )
+
+    result = SemgrepCommand().run(check=check, project_root=PROJECT_ROOT)
+
+    assert processes.started[0].argv == (
+        "uvx",
+        "--from",
+        "semgrep==1.176.1",
+        "semgrep",
+        "scan",
+        "--config",
+        ".checksmith/semgrep.yaml",
+        "--json",
+        ".",
+    )
+    assert processes.started[0].cwd == PROJECT_ROOT
+    assert result == CheckResult(check_id="function-style", severity=None, messages=())

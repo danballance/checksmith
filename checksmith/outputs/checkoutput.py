@@ -2,8 +2,9 @@
 
 from rich.console import RenderableType
 from rich.table import Table
+from rich.text import Text
 
-from checksmith.dtos import CheckResult, ExitCode
+from checksmith.dtos import CheckResult, ErrorSeverity, ExitCode
 from checksmith.outputs.base import CliOutput
 
 
@@ -14,7 +15,9 @@ class CheckOutput(CliOutput):
 
     @property
     def exit_code(self) -> ExitCode:
-        if any(result.failed for result in self.results):
+        if any(result.severity is ErrorSeverity.ERROR for result in self.results):
+            return ExitCode.ERROR
+        if any(result.severity is ErrorSeverity.FAILURE for result in self.results):
             return ExitCode.UNHEALTHY
         return ExitCode.SUCCESS
 
@@ -22,8 +25,16 @@ class CheckOutput(CliOutput):
         table = Table(title="Checksmith")
         table.add_column("Check")
         table.add_column("Status")
-        table.add_column("Findings")
+        table.add_column("Messages")
         for result in self.results:
-            status = "[red]FAIL[/red]" if result.failed else "[green]PASS[/green]"
-            table.add_row(result.check_id, status, "\n".join(result.findings))
+            match result.severity:
+                case ErrorSeverity.ERROR:
+                    status = "[red]ERROR[/red]"
+                case ErrorSeverity.FAILURE:
+                    status = "[red]FAIL[/red]"
+                case None:
+                    status = "[green]PASS[/green]"
+            table.add_row(
+                Text(result.check_id), status, Text("\n".join(result.messages))
+            )
         return table

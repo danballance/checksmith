@@ -1,0 +1,50 @@
+rules:
+  - id: python-require-keyword-only-parameters
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Declare parameters after a bare * so callers must pass them
+      by name. Only self or cls may precede the *.
+    patterns:
+      # Start with all named function definitions.
+      - pattern: |
+          def $FUNC(...):
+              ...
+
+      # Allow functions with only keyword-only parameters.
+      - pattern-not: |
+          def $FUNC(*, ...):
+              ...
+
+      # Allow conventional instance and class method receivers.
+      - pattern-not: |
+          def $FUNC(self, *, ...):
+              ...
+      - pattern-not: |
+          def $FUNC(cls, *, ...):
+              ...
+
+      # Allow functions with no caller-supplied parameters.
+      - pattern-not: |
+          def $FUNC():
+              ...
+      - pattern-not: |
+          def $FUNC(self):
+              ...
+      - pattern-not: |
+          def $FUNC(cls):
+              ...
+
+  - id: python-no-variadic-parameters
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Replace variadic parameters with explicitly named parameters.
+      Neither *args nor **kwargs is permitted.
+    pattern-either:
+      - pattern: |
+          def $FUNC(..., *$ARGS, ...):
+              ...
+      - pattern: |
+          def $FUNC(..., **$KWARGS):
+              ...

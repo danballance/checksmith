@@ -11,6 +11,7 @@ from importlib.resources import as_file, files
 from pathlib import Path
 
 import pytest
+import yaml
 
 from checksmith.config import Config
 from checksmith.dtos import CommandName, PackageType
@@ -24,7 +25,7 @@ def default_assets() -> Iterator[Path]:
         yield path
 
 
-def test_the_starter_directory_ships_both_files(default_assets: Path) -> None:
+def test_the_starter_directory_ships_three_files(default_assets: Path) -> None:
     """Dot-entries are skipped: Ruff plants a cache beside any config it finds."""
     shipped = sorted(
         item.name
@@ -32,7 +33,7 @@ def test_the_starter_directory_ships_both_files(default_assets: Path) -> None:
         if not item.name.startswith(".")
     )
 
-    assert shipped == ["checksmith.yaml", "ruff.toml"]
+    assert shipped == ["checksmith.yaml", "ruff.toml", "semgrep.yaml"]
 
 
 def test_the_starter_config_loads_through_the_real_loader(
@@ -43,9 +44,9 @@ def test_the_starter_config_loads_through_the_real_loader(
         working_directory=default_assets,
     )
 
-    # ``project_root: ..`` resolves against the directory the config sits in.
-    assert config.project_root == default_assets.parent
-    assert tuple(check.id for check in config.checks) == ("ruff",)
+    # ``project_root: ../../..`` resolves against the config directory.
+    assert config.project_root == default_assets.parents[2]
+    assert tuple(check.id for check in config.checks) == ("ruff", "semgrep")
 
 
 def test_the_starter_config_references_only_files_it_ships_with(
@@ -61,8 +62,14 @@ def test_the_starter_config_references_only_files_it_ships_with(
         working_directory=default_assets,
     )
 
-    assert "./ruff.toml" in config.checks[0].args
-    assert (default_assets / "ruff.toml").is_file()
+    for check, filename in zip(
+        config.checks, ("ruff.toml", "semgrep.yaml"), strict=True
+    ):
+        args = check.args
+        tool_config = config.project_root / args[args.index("--config") + 1]
+
+        assert tool_config == default_assets / filename
+        assert tool_config.is_file()
 
 
 def test_the_starter_config_builds_a_ruff_invocation(
@@ -80,9 +87,32 @@ def test_the_starter_config_builds_a_ruff_invocation(
         "ruff",
         "check",
         "--config",
-        "./ruff.toml",
+        "./checksmith/assets/default/ruff.toml",
         "--output-format",
         "json",
+        ".",
+    )
+
+
+def test_the_starter_config_builds_a_semgrep_invocation(
+    default_assets: Path,
+) -> None:
+    config = Config.from_path(
+        config_path=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+
+    assert config.checks[1].argv == (
+        "uvx",
+        "--from",
+        "semgrep==1.176.1",
+        "semgrep",
+        "scan",
+        "--config",
+        "./checksmith/assets/default/semgrep.yaml",
+        "--json",
+        "--error",
+        "--strict",
         ".",
     )
 
@@ -103,15 +133,17 @@ def test_the_starter_config_asks_for_the_output_its_command_reads(
     assert config.checks[0].command is CommandName.RUFF
     assert "--output-format" in config.checks[0].args
     assert "json" in config.checks[0].args
+    assert config.checks[1].command is CommandName.SEMGREP
+    assert "--json" in config.checks[1].args
 
 
-def test_the_starter_check_uses_the_python_package_type(default_assets: Path) -> None:
+def test_the_starter_checks_use_the_python_package_type(default_assets: Path) -> None:
     config = Config.from_path(
         config_path=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
-    assert config.checks[0].package_type is PackageType.UVX
+    assert all(check.package_type is PackageType.UVX for check in config.checks)
 
 
 def test_the_starter_ruff_configuration_is_a_standalone_one(
@@ -136,3 +168,38 @@ def test_the_starter_ruff_configuration_selects_its_rules_explicitly(
 
     assert settings["lint"]["select"] != []
     assert settings["target-version"] == "py312"
+
+
+def test_the_starter_semgrep_configuration_enforces_the_supplied_rules(
+    default_assets: Path,
+) -> None:
+    settings = yaml.safe_load(
+        (default_assets / "semgrep.yaml").read_text(encoding="utf-8")
+    )
+    keyword_rule, variadic_rule = settings["rules"]
+
+    assert keyword_rule["id"] == "python-require-keyword-only-parameters"
+    assert variadic_rule["id"] == "python-no-variadic-parameters"
+    assert all(rule["languages"] == ["python"] for rule in settings["rules"])
+    assert all(rule["severity"] == "ERROR" for rule in settings["rules"])
+    assert keyword_rule["message"] == (
+        "Declare parameters after a bare * so callers must pass them "
+        "by name. Only self or cls may precede the *."
+    )
+    assert variadic_rule["message"] == (
+        "Replace variadic parameters with explicitly named parameters. "
+        "Neither *args nor **kwargs is permitted."
+    )
+    assert keyword_rule["patterns"] == [
+        {"pattern": "def $FUNC(...):\n    ...\n"},
+        {"pattern-not": "def $FUNC(*, ...):\n    ...\n"},
+        {"pattern-not": "def $FUNC(self, *, ...):\n    ...\n"},
+        {"pattern-not": "def $FUNC(cls, *, ...):\n    ...\n"},
+        {"pattern-not": "def $FUNC():\n    ...\n"},
+        {"pattern-not": "def $FUNC(self):\n    ...\n"},
+        {"pattern-not": "def $FUNC(cls):\n    ...\n"},
+    ]
+    assert variadic_rule["pattern-either"] == [
+        {"pattern": "def $FUNC(..., *$ARGS, ...):\n    ...\n"},
+        {"pattern": "def $FUNC(..., **$KWARGS):\n    ...\n"},
+    ]

@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 
 from checksmith.config import Check, Config
-from checksmith.dtos import PackageType
+from checksmith.dtos import CommandName, PackageType
 from checksmith.errors import ConfigSchemaError, ConfigSyntaxError
 
 CONFIG_PATH = Path("/project/.checksmith/checksmith.yaml")
@@ -515,6 +515,28 @@ def test_a_uvx_check_builds_the_documented_vector() -> None:
         "check",
         "--config",
         "./ruff.toml",
+        ".",
+    )
+
+
+def test_a_semgrep_check_is_accepted_and_builds_a_uvx_vector() -> None:
+    configured = resolved(
+        id="function-style",
+        package="semgrep==1.176.1",
+        command="semgrep",
+        args=["scan", "--json", "--config", ".checksmith/semgrep.yaml", "."],
+    )
+
+    assert configured.command is CommandName.SEMGREP
+    assert configured.argv == (
+        "uvx",
+        "--from",
+        "semgrep==1.176.1",
+        "semgrep",
+        "scan",
+        "--json",
+        "--config",
+        ".checksmith/semgrep.yaml",
         ".",
     )
 

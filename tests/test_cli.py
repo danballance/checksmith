@@ -19,8 +19,16 @@ from checksmith.cli import (
     _emit,
     app,
 )
-from checksmith.dtos import CheckResult, ExitCode
-from checksmith.errors import ConfigSyntaxError
+from checksmith.commands.command import Command
+from checksmith.config import Check
+from checksmith.dtos import (
+    CheckResult,
+    CommandName,
+    ErrorSeverity,
+    ExitCode,
+    PackageType,
+)
+from checksmith.errors import CheckOutputError, ConfigSyntaxError
 from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
 from tests.conftest import FakeProcesses
@@ -139,13 +147,12 @@ def test_check_accepts_an_absolute_config_path(
     assert result.exit_code == ExitCode.SUCCESS
 
 
-def test_a_tool_that_returns_something_unreadable_stops_the_run(
+def test_a_tool_that_cannot_scan_is_reported_as_an_error_row(
     cli_runner: CliRunner,
     config_tree: Path,
     processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Ruff broken is an error, not a FAIL row: the gate has not judged anything."""
     monkeypatch.chdir(config_tree)
     processes.exit_code = 2
     processes.stderr = "ruff failed\n  Cause: unknown field `nonsense_key`\n"
@@ -156,9 +163,238 @@ def test_a_tool_that_returns_something_unreadable_stops_the_run(
     )
 
     assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert "ERROR" in result.stdout
+    assert "Check 'ruff': ruff exited 2" in result.stdout
+    assert "unknown field `nonsense_key`" in result.stdout
+
+
+@pytest.fixture
+def semgrep_config_path(tmp_path: Path) -> Path:
+    path = tmp_path / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: .\n"
+        "checks:\n"
+        "  - id: function-style\n"
+        "    package_type: uvx\n"
+        "    package: semgrep==1.176.1\n"
+        "    command: semgrep\n"
+        "    args: [scan, --json, --config, .checksmith/semgrep.yaml, .]\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cli_reports_a_clean_semgrep_scan(
+    cli_runner: CliRunner,
+    semgrep_config_path: Path,
+    processes: FakeProcesses,
+) -> None:
+    processes.stdout = '{"results": [], "errors": []}'
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(semgrep_config_path), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started[0].cwd == semgrep_config_path.parent
+    assert json.loads(result.stdout) == {
+        "results": [{"check_id": "function-style", "severity": None, "messages": []}]
+    }
+
+
+@pytest.mark.parametrize("tool_exit_code", [0, 1])
+def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
+    cli_runner: CliRunner,
+    semgrep_config_path: Path,
+    processes: FakeProcesses,
+    tool_exit_code: int,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = json.dumps(
+        {
+            "results": [
+                {
+                    "check_id": "python-no-variadic-parameters",
+                    "path": "app.py",
+                    "start": {"line": 1, "col": 1},
+                    "extra": {"message": "Replace variadic parameters."},
+                }
+            ],
+            "errors": [],
+        }
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(semgrep_config_path), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.UNHEALTHY
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "results": [
+            {
+                "check_id": "function-style",
+                "severity": "failure",
+                "messages": [
+                    (
+                        "app.py:1:1 python-no-variadic-parameters "
+                        "Replace variadic parameters."
+                    )
+                ],
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("tool_exit_code", "stdout", "stderr"),
+    [
+        (2, "", "Could not load semgrep.yaml"),
+        (
+            0,
+            '{"results": [], "errors": [{"message": "Could not load semgrep.yaml"}]}',
+            "",
+        ),
+    ],
+)
+def test_cli_reports_semgrep_scan_failures_as_errors(
+    cli_runner: CliRunner,
+    semgrep_config_path: Path,
+    processes: FakeProcesses,
+    tool_exit_code: int,
+    stdout: str,
+    stderr: str,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = stdout
+    processes.stderr = stderr
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(semgrep_config_path)],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert "ERROR" in result.stdout
+    assert "Check 'function-style':" in result.stdout
+    assert "Could not load semgrep.yaml" in result.stdout
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+def test_cli_reports_every_check_after_an_individual_tool_error(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fmt: OutputFormat,
+) -> None:
+    check_ids = ("first", "violations", "broken", "last")
+    checks = tuple(
+        Check(
+            id=check_id,
+            package_type=PackageType.UVX,
+            package="ruff==0.16.7",
+            command=CommandName.RUFF,
+            args=("check", "--output-format", "json", "."),
+        )
+        for check_id in check_ids
+    )
+    config_path = tmp_path / "checksmith.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "project_root": ".",
+                "checks": [check.model_dump(mode="json") for check in checks],
+            }
+        ),
+        encoding="utf-8",
+    )
+    error = CheckOutputError(
+        check_id="broken",
+        command=CommandName.RUFF,
+        summary="ruff could not scan",
+        problem="invalid configuration",
+    )
+    outcomes: dict[str, CheckResult | CheckOutputError] = {
+        "first": CheckResult(check_id="first", severity=None, messages=()),
+        "violations": CheckResult(
+            check_id="violations",
+            severity=ErrorSeverity.FAILURE,
+            messages=("app.py:1:1 F401 Unused import", "app.py:2:1 F821 Unknown name"),
+        ),
+        "broken": error,
+        "last": CheckResult(check_id="last", severity=None, messages=()),
+    }
+    runs: list[str] = []
+
+    def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
+        assert command.name is check.command
+        assert project_root == tmp_path
+        runs.append(check.id)
+        outcome = outcomes[check.id]
+        if isinstance(outcome, CheckOutputError):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(Command, "run", run)
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(config_path), "--format", fmt.value],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert runs == list(check_ids)
+    if fmt is OutputFormat.JSON:
+        assert json.loads(result.stdout) == {
+            "results": [
+                {"check_id": "first", "severity": None, "messages": []},
+                {
+                    "check_id": "violations",
+                    "severity": "failure",
+                    "messages": [
+                        "app.py:1:1 F401 Unused import",
+                        "app.py:2:1 F821 Unknown name",
+                    ],
+                },
+                {"check_id": "broken", "severity": "error", "messages": [str(error)]},
+                {"check_id": "last", "severity": None, "messages": []},
+            ]
+        }
+    else:
+        assert all(label in result.stdout for label in ("PASS", "FAIL", "ERROR"))
+        assert "Messages" in result.stdout
+        assert "Unused import" in result.stdout
+        assert "Unknown name" in result.stdout
+        assert "invalid configuration" in result.stdout
+        positions = tuple(result.stdout.index(check_id) for check_id in check_ids)
+        assert positions == tuple(sorted(positions))
+
+
+def test_an_unexpected_tool_adapter_bug_reaches_the_cli_error_boundary(
+    cli_runner: CliRunner,
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
+        assert command.name is check.command
+        assert project_root == config_path.parent.parent
+        raise RuntimeError("adapter bug")
+
+    monkeypatch.setattr(Command, "run", run)
+
+    result = cli_runner.invoke(app, ["check", "--config", str(config_path)])
+
+    assert result.exit_code == ExitCode.ERROR
     assert result.stdout == ""
-    assert "Check 'ruff': ruff exited 2" in result.stderr
-    assert "unknown field `nonsense_key`" in result.stderr
+    assert "general error: RuntimeError: adapter bug" in result.stderr
 
 
 def test_check_reports_a_bad_config_option_without_typers_wording(
@@ -183,6 +419,7 @@ def test_check_reports_a_bad_config_option_without_typers_wording(
 def test_a_configuration_error_reaches_stderr_whatever_the_format(
     cli_runner: CliRunner,
     tmp_path: Path,
+    processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
@@ -195,6 +432,7 @@ def test_a_configuration_error_reaches_stderr_whatever_the_format(
     assert result.exit_code == ExitCode.ERROR
     assert result.stdout == ""
     assert "No such file or directory" in result.stderr
+    assert processes.started == []
 
 
 def test_emit_renders_json_when_asked(capsys: pytest.CaptureFixture[str]) -> None:
@@ -208,7 +446,12 @@ def test_emit_renders_a_table_by_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     with pytest.raises(typer.Exit):
-        _emit(CheckOutput(results=(CheckResult(check_id="ruff"),)), OutputFormat.TEXT)
+        _emit(
+            CheckOutput(
+                results=(CheckResult(check_id="ruff", severity=None, messages=()),)
+            ),
+            OutputFormat.TEXT,
+        )
 
     captured = capsys.readouterr().out
     assert "Checksmith" in captured
@@ -218,7 +461,15 @@ def test_emit_renders_a_table_by_default(
 def test_emit_exits_with_the_code_its_output_implies(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    output = CheckOutput(results=(CheckResult(check_id="ruff", failed=True),))
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="ruff",
+                severity=ErrorSeverity.FAILURE,
+                messages=("app.py:1:1 F401 Unused import",),
+            ),
+        )
+    )
 
     with pytest.raises(typer.Exit) as raised:
         _emit(output, OutputFormat.TEXT)

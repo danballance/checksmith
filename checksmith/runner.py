@@ -6,7 +6,8 @@ from pathlib import Path
 
 from checksmith.commands.command import Command
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName
+from checksmith.dtos import CheckResult, CommandName, ErrorSeverity
+from checksmith.errors import CheckExecutionError, CheckOutputError
 from checksmith.outputs.checkoutput import CheckOutput
 
 logger = logging.getLogger(__name__)
@@ -38,12 +39,20 @@ class Runner:
         results: list[CheckResult] = []
         for check in self.checks:
             command = self.commands[check.command]
-            result = command.run(check=check, project_root=self.project_root)
+            try:
+                result = command.run(check=check, project_root=self.project_root)
+            except (CheckExecutionError, CheckOutputError) as error:
+                logger.debug("%s could not complete", check.id, exc_info=True)
+                result = CheckResult(
+                    check_id=check.id,
+                    severity=ErrorSeverity.ERROR,
+                    messages=(str(error),),
+                )
             logger.debug(
-                "%s failed=%s findings=%d",
+                "%s severity=%s messages=%d",
                 result.check_id,
-                result.failed,
-                len(result.findings),
+                result.severity,
+                len(result.messages),
             )
             results.append(result)
         return CheckOutput(results=tuple(results))
