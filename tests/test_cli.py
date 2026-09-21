@@ -34,6 +34,19 @@ from checksmith.outputs.checkoutput import CheckOutput
 from tests.conftest import FakeProcesses
 
 
+def test_cli_imports_the_command_factory_and_implementations(
+    imported_modules: Callable[[str], frozenset[str]],
+) -> None:
+    modules = imported_modules("checksmith.cli")
+
+    assert {
+        "checksmith.commands.registry",
+        "checksmith.commands.command",
+        "checksmith.commands.ruff",
+        "checksmith.commands.semgrep",
+    } <= modules
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()

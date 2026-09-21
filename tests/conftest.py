@@ -2,13 +2,41 @@
 
 import logging
 import subprocess
-from collections.abc import Iterator, Sequence
+import sys
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
 from checksmith.logs import LOGGER_NAME
+
+
+@pytest.fixture
+def imported_modules() -> Callable[[str], frozenset[str]]:
+    def import_in_fresh_process(module: str) -> frozenset[str]:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import importlib, sys\n"
+                    "importlib.import_module(sys.argv[1])\n"
+                    "sys.stdout.write('\\n'.join(sys.modules))\n"
+                ),
+                module,
+            ],
+            cwd=Path(__file__).resolve().parent.parent,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+            timeout=10,
+        )
+        return frozenset(completed.stdout.splitlines())
+
+    return import_in_fresh_process
 
 
 @pytest.fixture(autouse=True)

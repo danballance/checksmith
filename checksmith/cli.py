@@ -10,7 +10,7 @@ from rich.console import Console
 from typer.core import TyperGroup
 
 from checksmith import __version__
-from checksmith.commands.command import Command
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Config
 from checksmith.dtos import ExitCode
 from checksmith.errors import ChecksmithError
@@ -181,7 +181,7 @@ def check(
     )
     runner = Runner(
         checks=config.checks,
-        commands=Command.registry(),
+        commands=CommandFactory.registry(),
         project_root=config.project_root,
     )
     _emit(runner.check(), fmt)

@@ -1,12 +1,13 @@
 """Tests for :mod:`checksmith.runner`."""
 
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
 from checksmith.commands.command import Command
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import (
     CheckResult,
@@ -20,6 +21,18 @@ from checksmith.runner import Runner
 from tests.conftest import FakeProcesses
 
 PROJECT_ROOT = Path("/workspace/project")
+
+
+def test_importing_the_runner_does_not_load_command_implementations(
+    imported_modules: Callable[[str], frozenset[str]],
+) -> None:
+    modules = imported_modules("checksmith.runner")
+
+    assert not modules & {
+        "checksmith.commands.registry",
+        "checksmith.commands.ruff",
+        "checksmith.commands.semgrep",
+    }
 
 
 class RecordingCommand(Command):
@@ -79,7 +92,7 @@ def checks() -> tuple[Check, ...]:
 
 
 def test_runner_retains_what_it_was_given(checks: tuple[Check, ...]) -> None:
-    commands = Command.registry()
+    commands = CommandFactory.registry()
 
     runner = Runner(checks=checks, commands=commands, project_root=PROJECT_ROOT)
 
@@ -159,7 +172,7 @@ def test_unreadable_tool_reports_are_collected_for_every_check(
 ) -> None:
     output = Runner(
         checks=checks,
-        commands=Command.registry(),
+        commands=CommandFactory.registry(),
         project_root=PROJECT_ROOT,
     ).check()
 
@@ -182,7 +195,7 @@ def test_a_whole_suite_runs_through_the_commands_checksmith_ships(
 
     output = Runner(
         checks=checks,
-        commands=Command.registry(),
+        commands=CommandFactory.registry(),
         project_root=PROJECT_ROOT,
     ).check()
 
@@ -199,7 +212,7 @@ def test_a_run_with_no_checks_at_all_is_rejected() -> None:
     with pytest.raises(ValueError, match="at least one check"):
         Runner(
             checks=(),
-            commands=Command.registry(),
+            commands=CommandFactory.registry(),
             project_root=PROJECT_ROOT,
         ).check()
 
@@ -248,7 +261,7 @@ def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
 
     output = Runner(
         checks=checks,
-        commands=Command.registry(),
+        commands=CommandFactory.registry(),
         project_root=PROJECT_ROOT,
     ).check()
 
