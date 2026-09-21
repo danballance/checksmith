@@ -48,3 +48,172 @@ rules:
       - pattern: |
           def $FUNC(..., **$KWARGS):
               ...
+
+  - id: python-imports-at-top
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Place imports at the top of the module before other code.
+      Only top-of-module TYPE_CHECKING import blocks are permitted.
+    options:
+      go_deeper_stmt: false
+      implicit_deep_exprstmt: false
+      constant_propagation: false
+    patterns:
+      - pattern-either:
+          - pattern: import $MODULE
+          - pattern: from $MODULE import $NAME
+      - pattern-either:
+          # Focus the containing statement so its later siblings are excluded.
+          - patterns:
+              - pattern-inside: |
+                  $BLOCK
+                  ...
+              - metavariable-regex:
+                  metavariable: $BLOCK
+                  regex: '^(?!(?:import|from)\b)'
+              - pattern-not: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                  ...
+              - focus-metavariable: $BLOCK
+
+          # TYPE_CHECKING only permits direct imports in its true branch.
+          - patterns:
+              - pattern-inside: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                      $NESTED
+                      ...
+              - metavariable-regex:
+                  metavariable: $NESTED
+                  regex: '^(?!(?:import|from)\b)'
+              - focus-metavariable: $NESTED
+          - patterns:
+              - pattern-inside: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                  else:
+                      ...
+                      $OTHER
+                      ...
+              - focus-metavariable: $OTHER
+
+          # Non-import code in either guard branch also ends the import section.
+          - patterns:
+              - pattern-inside: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                      $CODE
+                      ...
+                      $AFTER
+                      ...
+              - metavariable-regex:
+                  metavariable: $CODE
+                  regex: '^(?!(?:import|from)\b)'
+              - focus-metavariable: $AFTER
+          - patterns:
+              - pattern-inside: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                      $CODE
+                      ...
+                  ...
+                  $AFTER
+              - metavariable-regex:
+                  metavariable: $CODE
+                  regex: '^(?!(?:import|from)\b)'
+              - focus-metavariable: $AFTER
+          - patterns:
+              - pattern-inside: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                  else:
+                      ...
+                  ...
+                  $AFTER
+              - focus-metavariable: $AFTER
+
+          # A preceding non-import statement ends the initial import section.
+          - patterns:
+              - pattern-inside: |
+                  $BEFORE
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  import $IMPORTED
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  from $IMPORTED import $MEMBER
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  "..."
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  r"..."
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  R"..."
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  u"..."
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  U"..."
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  "..." "..."
+                  ...
+                  $AFTER
+              - pattern-not: |
+                  if typing.TYPE_CHECKING:
+                      ...
+                  ...
+                  $AFTER
+              - focus-metavariable: $AFTER
+
+          # Only the first string statement can be a module docstring.
+          - patterns:
+              - pattern-inside: |
+                  $PREVIOUS
+                  $STRING
+                  ...
+                  $AFTER
+              - metavariable-pattern:
+                  metavariable: $STRING
+                  pattern-either:
+                      - pattern: '"..."'
+                      - pattern: 'r"..."'
+                      - pattern: 'R"..."'
+                      - pattern: 'u"..."'
+                      - pattern: 'U"..."'
+                      - pattern: '"..." "..."'
+              - focus-metavariable: $AFTER
+
+          # Bytes and formatted strings cannot form a docstring, even in a
+          # concatenation that also contains ordinary string literals.
+          - patterns:
+              - pattern-inside: |
+                  $BEFORE
+                  ...
+                  $AFTER
+              - metavariable-regex:
+                  metavariable: $BEFORE
+                  regex: '(?i)^[\s(]*(?:b|br|rb)[\x27\x22]'
+              - focus-metavariable: $AFTER
+          - patterns:
+              - pattern-inside: |
+                  $BEFORE
+                  ...
+                  $AFTER
+              - metavariable-pattern:
+                  metavariable: $BEFORE
+                  pattern: 'f"..."'
+              - focus-metavariable: $AFTER
