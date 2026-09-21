@@ -30,6 +30,9 @@ class Command(ABC):
     def name(self) -> CommandName:
         """The config value that selects this command."""
 
+    def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
+        return True
+
     def run(self, *, check: Check, project_root: Path) -> CheckResult:
         """Run one check's process and convert what it returned.
 

@@ -23,8 +23,8 @@ from checksmith.commands.command import Command
 from checksmith.config import Check
 from checksmith.dtos import (
     CheckResult,
+    CheckStatus,
     CommandName,
-    ErrorSeverity,
     ExitCode,
     PackageType,
 )
@@ -42,6 +42,7 @@ def test_cli_imports_the_command_factory_and_implementations(
     assert {
         "checksmith.commands.registry",
         "checksmith.commands.command",
+        "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
     } <= modules
@@ -215,7 +216,7 @@ def test_cli_reports_a_clean_semgrep_scan(
     assert result.stderr == ""
     assert processes.started[0].cwd == semgrep_config_file.parent
     assert json.loads(result.stdout) == {
-        "results": [{"check_id": "function-style", "severity": None, "messages": []}]
+        "results": [{"check_id": "function-style", "status": "passed", "messages": []}]
     }
 
 
@@ -252,7 +253,7 @@ def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
         "results": [
             {
                 "check_id": "function-style",
-                "severity": "failure",
+                "status": "failed",
                 "messages": [
                     (
                         "app.py:1:1 python-no-variadic-parameters "
@@ -299,6 +300,214 @@ def test_cli_reports_semgrep_scan_failures_as_errors(
     assert "Could not load semgrep.yaml" in result.stdout
 
 
+@pytest.fixture
+def import_linter_config_file(tmp_path: Path) -> Path:
+    path = tmp_path / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: .\n"
+        "checks:\n"
+        "  - id: dependencies\n"
+        "    package_type: uvx\n"
+        "    package: import-linter==2.15\n"
+        "    command: import-linter\n"
+        "    args: [lint, --config, pyproject.toml, --no-logo]\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture
+def import_linter_pyproject_file(import_linter_config_file: Path) -> Path:
+    path = import_linter_config_file.parent / "pyproject.toml"
+    path.write_text(
+        "[tool.importlinter]\n"
+        'root_package = "sample"\n'
+        "[[tool.importlinter.contracts]]\n"
+        'name = "Domain does not import infrastructure"\n'
+        'type = "forbidden"\n'
+        'source_modules = ["sample.domain"]\n'
+        'forbidden_modules = ["sample.infrastructure"]\n',
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+@pytest.mark.parametrize("pyproject", [None, "[tool.importlinter]\ncontracts = []\n"])
+def test_cli_skips_import_linter_without_configured_contracts(
+    cli_runner: CliRunner,
+    import_linter_config_file: Path,
+    processes: FakeProcesses,
+    fmt: OutputFormat,
+    pyproject: str | None,
+) -> None:
+    if pyproject is not None:
+        (import_linter_config_file.parent / "pyproject.toml").write_text(
+            pyproject,
+            encoding="utf-8",
+        )
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(import_linter_config_file), "--format", fmt.value],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started == []
+    if fmt is OutputFormat.JSON:
+        results = json.loads(result.stdout)["results"]
+        assert len(results) == 1
+        assert results[0]["check_id"] == "dependencies"
+        assert results[0]["status"] == "skipped"
+        assert results[0]["messages"]
+    else:
+        assert "dependencies" in result.stdout
+        assert "SKIP" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("tool_exit_code", "stdout", "expected_status", "expected_exit_code"),
+    [
+        (
+            0,
+            (
+                "Domain does not import infrastructure KEPT\n"
+                "Contracts: 1 kept, 0 broken.\n"
+            ),
+            CheckStatus.PASSED,
+            ExitCode.SUCCESS,
+        ),
+        (
+            1,
+            (
+                "Domain does not import infrastructure BROKEN\n"
+                "Contracts: 0 kept, 1 broken.\n"
+                "sample.domain is not allowed to import sample.infrastructure\n"
+            ),
+            CheckStatus.FAILED,
+            ExitCode.UNHEALTHY,
+        ),
+    ],
+)
+def test_cli_runs_import_linter_with_contracts_and_reports_its_findings(
+    cli_runner: CliRunner,
+    import_linter_config_file: Path,
+    import_linter_pyproject_file: Path,
+    processes: FakeProcesses,
+    tool_exit_code: int,
+    stdout: str,
+    expected_status: CheckStatus,
+    expected_exit_code: ExitCode,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = stdout
+    processes.stderr = "Warning: an external dependency was ignored.\n"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(import_linter_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == expected_exit_code
+    assert result.stderr == ""
+    assert len(processes.started) == 1
+    assert processes.started[0].cwd == import_linter_pyproject_file.parent
+    assert processes.started[0].argv == (
+        "uvx",
+        "--from",
+        "import-linter==2.15",
+        "import-linter",
+        "lint",
+        "--config",
+        "pyproject.toml",
+        "--no-logo",
+    )
+    results = json.loads(result.stdout)["results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "dependencies"
+    assert results[0]["status"] == expected_status.value
+    messages = "\n".join(results[0]["messages"])
+    assert stdout.strip() in messages
+    assert processes.stderr.strip() in messages
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+def test_cli_reports_malformed_import_linter_toml_as_an_error(
+    cli_runner: CliRunner,
+    import_linter_config_file: Path,
+    processes: FakeProcesses,
+    fmt: OutputFormat,
+) -> None:
+    (import_linter_config_file.parent / "pyproject.toml").write_text(
+        "[tool.importlinter\n",
+        encoding="utf-8",
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(import_linter_config_file), "--format", fmt.value],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert processes.started == []
+    if fmt is OutputFormat.JSON:
+        results = json.loads(result.stdout)["results"]
+        assert len(results) == 1
+        assert results[0]["check_id"] == "dependencies"
+        assert results[0]["status"] == "error"
+        assert "pyproject.toml" in "\n".join(results[0]["messages"])
+    else:
+        assert "ERROR" in result.stdout
+        assert "dependencies" in result.stdout
+        assert "Expected ']'" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "first_status", "expected_exit_code"),
+    [
+        ("[tool.importlinter]\ncontracts = []\n", "skipped", ExitCode.SUCCESS),
+        ("[tool.importlinter\n", "error", ExitCode.ERROR),
+    ],
+)
+def test_cli_still_runs_later_checks_after_an_import_linter_prerequisite_result(
+    cli_runner: CliRunner,
+    import_linter_config_file: Path,
+    processes: FakeProcesses,
+    pyproject: str,
+    first_status: str,
+    expected_exit_code: ExitCode,
+) -> None:
+    (import_linter_config_file.parent / "pyproject.toml").write_text(
+        pyproject,
+        encoding="utf-8",
+    )
+    with import_linter_config_file.open("a", encoding="utf-8") as config:
+        config.write(
+            "  - id: later\n"
+            "    package_type: uvx\n"
+            "    package: ruff==0.16.7\n"
+            "    command: ruff\n"
+            "    args: [check, --output-format, json, .]\n"
+        )
+    processes.stdout = "[]"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(import_linter_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == expected_exit_code
+    assert result.stderr == ""
+    assert len(processes.started) == 1
+    assert processes.started[0].argv[3] == "ruff"
+    results = json.loads(result.stdout)["results"]
+    assert [entry["check_id"] for entry in results] == ["dependencies", "later"]
+    assert [entry["status"] for entry in results] == [first_status, "passed"]
+
+
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 def test_cli_reports_every_check_after_an_individual_tool_error(
     cli_runner: CliRunner,
@@ -335,14 +544,14 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
         problem="invalid configuration",
     )
     outcomes: dict[str, CheckResult | CheckOutputError] = {
-        "first": CheckResult(check_id="first", severity=None, messages=()),
+        "first": CheckResult(check_id="first", status=CheckStatus.PASSED, messages=()),
         "violations": CheckResult(
             check_id="violations",
-            severity=ErrorSeverity.FAILURE,
+            status=CheckStatus.FAILED,
             messages=("app.py:1:1 F401 Unused import", "app.py:2:1 F821 Unknown name"),
         ),
         "broken": error,
-        "last": CheckResult(check_id="last", severity=None, messages=()),
+        "last": CheckResult(check_id="last", status=CheckStatus.PASSED, messages=()),
     }
     runs: list[str] = []
 
@@ -368,17 +577,17 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
     if fmt is OutputFormat.JSON:
         assert json.loads(result.stdout) == {
             "results": [
-                {"check_id": "first", "severity": None, "messages": []},
+                {"check_id": "first", "status": "passed", "messages": []},
                 {
                     "check_id": "violations",
-                    "severity": "failure",
+                    "status": "failed",
                     "messages": [
                         "app.py:1:1 F401 Unused import",
                         "app.py:2:1 F821 Unknown name",
                     ],
                 },
-                {"check_id": "broken", "severity": "error", "messages": [str(error)]},
-                {"check_id": "last", "severity": None, "messages": []},
+                {"check_id": "broken", "status": "error", "messages": [str(error)]},
+                {"check_id": "last", "status": "passed", "messages": []},
             ]
         }
     else:
@@ -461,7 +670,11 @@ def test_emit_renders_a_table_by_default(
     with pytest.raises(typer.Exit):
         _emit(
             CheckOutput(
-                results=(CheckResult(check_id="ruff", severity=None, messages=()),)
+                results=(
+                    CheckResult(
+                        check_id="ruff", status=CheckStatus.PASSED, messages=()
+                    ),
+                )
             ),
             OutputFormat.TEXT,
         )
@@ -478,7 +691,7 @@ def test_emit_exits_with_the_code_its_output_implies(
         results=(
             CheckResult(
                 check_id="ruff",
-                severity=ErrorSeverity.FAILURE,
+                status=CheckStatus.FAILED,
                 messages=("app.py:1:1 F401 Unused import",),
             ),
         )
@@ -549,7 +762,7 @@ def test_an_authored_diagnostic_is_not_labelled_with_its_class(
         raise ConfigSyntaxError(
             config_file=Path("/project/.checksmith/checksmith.yaml"),
             problem=(
-                'expected a mapping at the top level in '
+                "expected a mapping at the top level in "
                 '"/project/.checksmith/checksmith.yaml", found NoneType'
             ),
         )

@@ -6,7 +6,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 from checksmith.commands.command import Command
-from checksmith.dtos import CheckResult, CommandName, ErrorSeverity
+from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
 logger = logging.getLogger(__name__)
@@ -109,7 +109,7 @@ class RuffCommand(Command):
             check_id=check_id,
             # The findings are the report. Separating a report from a failure
             # was the exit code's whole job here, and it has done it.
-            severity=ErrorSeverity.FAILURE if findings else None,
+            status=CheckStatus.FAILED if findings else CheckStatus.PASSED,
             messages=findings,
         )
 

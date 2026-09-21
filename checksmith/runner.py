@@ -6,8 +6,12 @@ from pathlib import Path
 
 from checksmith.commands.command import Command
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName, ErrorSeverity
-from checksmith.errors import CheckExecutionError, CheckOutputError
+from checksmith.dtos import CheckResult, CheckStatus, CommandName
+from checksmith.errors import (
+    CheckExecutionError,
+    CheckOutputError,
+    CheckPrerequisiteError,
+)
 from checksmith.outputs.checkoutput import CheckOutput
 
 logger = logging.getLogger(__name__)
@@ -40,18 +44,31 @@ class Runner:
         for check in self.checks:
             command = self.commands[check.command]
             try:
-                result = command.run(check=check, project_root=self.project_root)
-            except (CheckExecutionError, CheckOutputError) as error:
+                if command.check_is_runnable(
+                    check=check, project_root=self.project_root
+                ):
+                    result = command.run(check=check, project_root=self.project_root)
+                else:
+                    result = CheckResult(
+                        check_id=check.id,
+                        status=CheckStatus.SKIPPED,
+                        messages=("Check is not applicable to this project.",),
+                    )
+            except (
+                CheckExecutionError,
+                CheckOutputError,
+                CheckPrerequisiteError,
+            ) as error:
                 logger.debug("%s could not complete", check.id, exc_info=True)
                 result = CheckResult(
                     check_id=check.id,
-                    severity=ErrorSeverity.ERROR,
+                    status=CheckStatus.ERROR,
                     messages=(str(error),),
                 )
             logger.debug(
-                "%s severity=%s messages=%d",
+                "%s status=%s messages=%d",
                 result.check_id,
-                result.severity,
+                result.status,
                 len(result.messages),
             )
             results.append(result)

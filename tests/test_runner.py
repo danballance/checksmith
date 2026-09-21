@@ -11,12 +11,16 @@ from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import (
     CheckResult,
+    CheckStatus,
     CommandName,
-    ErrorSeverity,
     ExitCode,
     PackageType,
 )
-from checksmith.errors import CheckExecutionError, CheckOutputError
+from checksmith.errors import (
+    CheckExecutionError,
+    CheckOutputError,
+    CheckPrerequisiteError,
+)
 from checksmith.runner import Runner
 from tests.conftest import FakeProcesses
 
@@ -30,6 +34,7 @@ def test_importing_the_runner_does_not_load_command_implementations(
 
     assert not modules & {
         "checksmith.commands.registry",
+        "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
     }
@@ -75,6 +80,29 @@ class RecordingCommand(Command):
         raise NotImplementedError
 
 
+class EligibilityCommand(RecordingCommand):
+    def __init__(
+        self,
+        *,
+        results: Mapping[str, CheckResult | Exception],
+        eligibility: Mapping[str, bool | Exception],
+    ) -> None:
+        super().__init__(results=results)
+        self.eligibility = eligibility
+        self.calls: list[tuple[str, Check, Path]] = []
+
+    def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
+        self.calls.append(("eligibility", check, project_root))
+        result = self.eligibility[check.id]
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def run(self, *, check: Check, project_root: Path) -> CheckResult:
+        self.calls.append(("run", check, project_root))
+        return super().run(check=check, project_root=project_root)
+
+
 def ruff_check(*, check_id: str) -> Check:
     return Check(
         id=check_id,
@@ -108,10 +136,12 @@ def test_every_check_is_run_once_and_every_result_is_kept(
         results={
             "lint": CheckResult(
                 check_id="lint",
-                severity=ErrorSeverity.FAILURE,
+                status=CheckStatus.FAILED,
                 messages=("app.py:1:1 F401 Unused import",),
             ),
-            "format": CheckResult(check_id="format", severity=None, messages=()),
+            "format": CheckResult(
+                check_id="format", status=CheckStatus.PASSED, messages=()
+            ),
         }
     )
 
@@ -132,8 +162,12 @@ def test_two_checks_naming_one_command_share_the_single_handler(
     """The point of the arrangement: a check configures a command, it is not one."""
     recorder = RecordingCommand(
         results={
-            "lint": CheckResult(check_id="lint", severity=None, messages=()),
-            "format": CheckResult(check_id="format", severity=None, messages=()),
+            "lint": CheckResult(
+                check_id="lint", status=CheckStatus.PASSED, messages=()
+            ),
+            "format": CheckResult(
+                check_id="format", status=CheckStatus.PASSED, messages=()
+            ),
         }
     )
 
@@ -152,8 +186,12 @@ def test_every_check_runs_in_the_one_project_root(
     """The root belongs to the config as a whole, not to any check in it."""
     recorder = RecordingCommand(
         results={
-            "lint": CheckResult(check_id="lint", severity=None, messages=()),
-            "format": CheckResult(check_id="format", severity=None, messages=()),
+            "lint": CheckResult(
+                check_id="lint", status=CheckStatus.PASSED, messages=()
+            ),
+            "format": CheckResult(
+                check_id="format", status=CheckStatus.PASSED, messages=()
+            ),
         }
     )
 
@@ -178,10 +216,9 @@ def test_unreadable_tool_reports_are_collected_for_every_check(
 
     assert len(processes.started) == 2
     assert tuple(result.check_id for result in output.results) == ("lint", "format")
-    assert all(result.severity is ErrorSeverity.ERROR for result in output.results)
+    assert all(result.status is CheckStatus.ERROR for result in output.results)
     assert all(
-        f"Check '{result.check_id}':" in result.messages[0]
-        for result in output.results
+        f"Check '{result.check_id}':" in result.messages[0] for result in output.results
     )
     assert output.exit_code is ExitCode.ERROR
 
@@ -201,8 +238,8 @@ def test_a_whole_suite_runs_through_the_commands_checksmith_ships(
 
     assert len(processes.started) == 2
     assert output.results == (
-        CheckResult(check_id="lint", severity=None, messages=()),
-        CheckResult(check_id="format", severity=None, messages=()),
+        CheckResult(check_id="lint", status=CheckStatus.PASSED, messages=()),
+        CheckResult(check_id="format", status=CheckStatus.PASSED, messages=()),
     )
     assert output.exit_code is ExitCode.SUCCESS
 
@@ -270,8 +307,8 @@ def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
         "semgrep",
     )
     assert output.results == (
-        CheckResult(check_id="lint", severity=None, messages=()),
-        CheckResult(check_id="function-style", severity=None, messages=()),
+        CheckResult(check_id="lint", status=CheckStatus.PASSED, messages=()),
+        CheckResult(check_id="function-style", status=CheckStatus.PASSED, messages=()),
     )
     assert output.exit_code is ExitCode.SUCCESS
 
@@ -296,13 +333,13 @@ def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
 def test_a_tool_error_preserves_prior_results_and_runs_later_checks(
     error: CheckExecutionError | CheckOutputError,
 ) -> None:
-    passing = CheckResult(check_id="before", severity=None, messages=())
+    passing = CheckResult(check_id="before", status=CheckStatus.PASSED, messages=())
     failing = CheckResult(
         check_id="violations",
-        severity=ErrorSeverity.FAILURE,
+        status=CheckStatus.FAILED,
         messages=("app.py:1:1 F401 Unused import", "app.py:2:1 F821 Unknown name"),
     )
-    later = CheckResult(check_id="after", severity=None, messages=())
+    later = CheckResult(check_id="after", status=CheckStatus.PASSED, messages=())
     recorder = RecordingCommand(
         results={
             "before": passing,
@@ -325,7 +362,7 @@ def test_a_tool_error_preserves_prior_results_and_runs_later_checks(
         failing,
         CheckResult(
             check_id="broken",
-            severity=ErrorSeverity.ERROR,
+            status=CheckStatus.ERROR,
             messages=(str(error),),
         ),
         later,
@@ -339,7 +376,9 @@ def test_unexpected_command_bugs_are_not_reported_as_tool_results(
     recorder = RecordingCommand(
         results={
             "lint": RuntimeError("adapter bug"),
-            "format": CheckResult(check_id="format", severity=None, messages=()),
+            "format": CheckResult(
+                check_id="format", status=CheckStatus.PASSED, messages=()
+            ),
         }
     )
 
@@ -351,3 +390,122 @@ def test_unexpected_command_bugs_are_not_reported_as_tool_results(
         ).check()
 
     assert recorder.runs == ["lint"]
+
+
+def test_eligibility_is_checked_once_per_check_immediately_before_execution() -> None:
+    before = ruff_check(check_id="before")
+    skipped = ruff_check(check_id="skipped")
+    after = ruff_check(check_id="after")
+    passing = CheckResult(check_id="before", status=CheckStatus.PASSED, messages=())
+    failing = CheckResult(
+        check_id="after", status=CheckStatus.FAILED, messages=("unused import",)
+    )
+    recorder = EligibilityCommand(
+        results={"before": passing, "after": failing},
+        eligibility={"before": True, "skipped": False, "after": True},
+    )
+
+    output = Runner(
+        checks=(before, skipped, after),
+        commands={CommandName.RUFF: recorder},
+        project_root=PROJECT_ROOT,
+    ).check()
+
+    assert recorder.calls == [
+        ("eligibility", before, PROJECT_ROOT),
+        ("run", before, PROJECT_ROOT),
+        ("eligibility", skipped, PROJECT_ROOT),
+        ("eligibility", after, PROJECT_ROOT),
+        ("run", after, PROJECT_ROOT),
+    ]
+    assert output.results == (
+        passing,
+        CheckResult(
+            check_id="skipped",
+            status=CheckStatus.SKIPPED,
+            messages=("Check is not applicable to this project.",),
+        ),
+        failing,
+    )
+    assert output.exit_code is ExitCode.UNHEALTHY
+
+
+def test_non_runnable_checks_never_start_a_subprocess(
+    checks: tuple[Check, ...],
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def not_runnable(self: Command, *, check: Check, project_root: Path) -> bool:
+        return False
+
+    monkeypatch.setattr(Command, "check_is_runnable", not_runnable)
+
+    output = Runner(
+        checks=checks,
+        commands=CommandFactory.registry(),
+        project_root=PROJECT_ROOT,
+    ).check()
+
+    assert processes.started == []
+    assert tuple(result.check_id for result in output.results) == ("lint", "format")
+    assert all(result.status is CheckStatus.SKIPPED for result in output.results)
+    assert output.exit_code is ExitCode.SUCCESS
+
+
+def test_a_prerequisite_error_preserves_results_and_runs_later_checks() -> None:
+    before = ruff_check(check_id="before")
+    broken = ruff_check(check_id="broken")
+    after = ruff_check(check_id="after")
+    passing = CheckResult(check_id="before", status=CheckStatus.PASSED, messages=())
+    later = CheckResult(check_id="after", status=CheckStatus.PASSED, messages=())
+    error = CheckPrerequisiteError(
+        check_id="broken",
+        command=CommandName.RUFF,
+        config_file=PROJECT_ROOT / "pyproject.toml",
+        problem="cannot read configuration",
+    )
+    recorder = EligibilityCommand(
+        results={"before": passing, "after": later},
+        eligibility={"before": True, "broken": error, "after": True},
+    )
+
+    output = Runner(
+        checks=(before, broken, after),
+        commands={CommandName.RUFF: recorder},
+        project_root=PROJECT_ROOT,
+    ).check()
+
+    assert recorder.calls == [
+        ("eligibility", before, PROJECT_ROOT),
+        ("run", before, PROJECT_ROOT),
+        ("eligibility", broken, PROJECT_ROOT),
+        ("eligibility", after, PROJECT_ROOT),
+        ("run", after, PROJECT_ROOT),
+    ]
+    assert output.results == (
+        passing,
+        CheckResult(
+            check_id="broken", status=CheckStatus.ERROR, messages=(str(error),)
+        ),
+        later,
+    )
+    assert output.exit_code is ExitCode.ERROR
+
+
+def test_an_unexpected_eligibility_bug_propagates_without_starting_the_check(
+    checks: tuple[Check, ...],
+) -> None:
+    recorder = EligibilityCommand(
+        results={},
+        eligibility={"lint": RuntimeError("eligibility bug"), "format": True},
+    )
+
+    with pytest.raises(RuntimeError, match="eligibility bug"):
+        Runner(
+            checks=checks,
+            commands={CommandName.RUFF: recorder},
+            project_root=PROJECT_ROOT,
+        ).check()
+
+    assert recorder.calls == [("eligibility", checks[0], PROJECT_ROOT)]
+    assert recorder.runs == []

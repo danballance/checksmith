@@ -1,6 +1,7 @@
 from collections.abc import Mapping
 
 from checksmith.commands.command import Command
+from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
 from checksmith.dtos import CommandName
@@ -21,6 +22,8 @@ class CommandFactory:
                 return RuffCommand()
             case CommandName.SEMGREP:
                 return SemgrepCommand()
+            case CommandName.IMPORT_LINTER:
+                return ImportLinterCommand()
 
     @classmethod
     def registry(cls) -> Mapping[CommandName, Command]:

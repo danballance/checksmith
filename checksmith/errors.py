@@ -117,6 +117,25 @@ class ConfigSchemaError(ConfigurationError):
         )
 
 
+class CheckPrerequisiteError(ChecksmithError):
+    def __init__(
+        self,
+        *,
+        check_id: str,
+        command: CommandName,
+        config_file: Path,
+        problem: str,
+    ) -> None:
+        self.check_id = check_id
+        self.command = command
+        self.config_file = config_file
+        self.problem = problem
+        super().__init__(
+            f"Check '{check_id}': could not determine whether {command} is runnable "
+            f"using {config_file}:\n{problem}"
+        )
+
+
 class CheckExecutionError(ChecksmithError):
     """A check's process could not be started.
 

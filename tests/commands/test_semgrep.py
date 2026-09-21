@@ -9,7 +9,7 @@ import pytest
 
 from checksmith.commands.semgrep import SemgrepCommand
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName, ErrorSeverity, PackageType
+from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError
 from tests.conftest import FakeProcesses
 
@@ -23,6 +23,7 @@ def test_importing_semgrep_does_not_load_other_command_implementations(
 
     assert not modules & {
         "checksmith.commands.registry",
+        "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
     }
 
@@ -71,7 +72,7 @@ def test_semgrep_without_findings_is_a_passing_check(exit_code: int) -> None:
         stdout='{"results": [], "errors": []}',
         exit_code=exit_code,
         stderr="",
-    ) == CheckResult(check_id="function-style", severity=None, messages=())
+    ) == CheckResult(check_id="function-style", status=CheckStatus.PASSED, messages=())
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
@@ -82,7 +83,7 @@ def test_semgrep_findings_fail_the_check_with_or_without_error_flag(
 
     assert result == CheckResult(
         check_id="function-style",
-        severity=ErrorSeverity.FAILURE,
+        status=CheckStatus.FAILED,
         messages=(
             (
                 "src/app.py:3:1 python-require-keyword-only-parameters "
@@ -230,4 +231,4 @@ def test_semgrep_runs_through_uvx_with_the_configured_arguments(
         ".",
     )
     assert processes.started[0].cwd == PROJECT_ROOT
-    assert result == CheckResult(check_id="function-style", severity=None, messages=())
+    assert result == CheckResult(check_id="function-style", status=CheckStatus.PASSED, messages=())

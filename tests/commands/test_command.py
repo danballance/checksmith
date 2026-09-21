@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict
 from checksmith.commands.command import Command
 from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName, ErrorSeverity, PackageType
+from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckExecutionError, CheckOutputError
 from tests.conftest import FakeProcesses
 
@@ -24,6 +24,7 @@ def test_importing_the_base_does_not_load_command_implementations(
 
     assert not modules & {
         "checksmith.commands.registry",
+        "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
     }
@@ -86,7 +87,7 @@ class RecordingCommand(Command):
         )
         return CheckResult(
             check_id=check_id,
-            severity=ErrorSeverity.FAILURE if exit_code != 0 else None,
+            status=CheckStatus.FAILED if exit_code != 0 else CheckStatus.PASSED,
             messages=("read by the recorder",),
         )
 
@@ -95,6 +96,21 @@ def test_the_base_command_cannot_be_instantiated() -> None:
     """An ABC, so a program with no implementation is an error, never a silent pass."""
     with pytest.raises(TypeError):
         Command()  # type: ignore[abstract]
+
+
+def test_a_command_is_runnable_without_overriding_the_hook(
+    processes: FakeProcesses,
+) -> None:
+    command = RecordingCommand()
+
+    assert (
+        command.check_is_runnable(
+            check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT
+        )
+        is True
+    )
+    assert processes.started == []
+    assert command.read == []
 
 
 # Starting the process
@@ -141,7 +157,9 @@ def test_a_program_that_cannot_be_started_names_the_check_that_wanted_it(
     processes.refusal = FileNotFoundError(2, "No such file or directory", "uvx")
 
     with pytest.raises(CheckExecutionError) as raised:
-        RecordingCommand().run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+        RecordingCommand().run(
+            check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT
+        )
 
     assert raised.value.check_id == "lint"
     assert raised.value.program == "uvx"
@@ -166,6 +184,7 @@ def test_nothing_is_read_when_nothing_ran(processes: FakeProcesses) -> None:
     [
         (CommandName.RUFF, "ruff==0.16.7"),
         (CommandName.SEMGREP, "semgrep==1.176.1"),
+        (CommandName.IMPORT_LINTER, "import-linter==2.15"),
     ],
 )
 def test_invalid_utf8_output_is_a_check_output_error(
@@ -173,9 +192,7 @@ def test_invalid_utf8_output_is_a_check_output_error(
     package: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    decoding_error = UnicodeDecodeError(
-        "utf-8", b"\xff", 0, 1, "invalid start byte"
-    )
+    decoding_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
     def refuse_decoding(
         argv: tuple[str, ...],
@@ -244,18 +261,20 @@ def test_a_nonzero_exit_is_read_rather_than_raised(
 
     result = command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
 
-    assert result.severity is ErrorSeverity.FAILURE
+    assert result.status is CheckStatus.FAILED
 
 
 def test_the_result_of_reading_the_output_is_the_result_of_the_run(
     processes: FakeProcesses,
 ) -> None:
     """``run`` starts and collects; judging what came back is not its job."""
-    result = RecordingCommand().run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    result = RecordingCommand().run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT
+    )
 
     assert result == CheckResult(
         check_id="lint",
-        severity=None,
+        status=CheckStatus.PASSED,
         messages=("read by the recorder",),
     )
 

@@ -8,7 +8,7 @@ import pytest
 
 from checksmith.commands.ruff import RuffCommand
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CommandName, ErrorSeverity, PackageType
+from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError
 from tests.conftest import FakeProcesses
 
@@ -22,6 +22,7 @@ def test_importing_ruff_does_not_load_other_command_implementations(
 
     assert not modules & {
         "checksmith.commands.registry",
+        "checksmith.commands.import_linter",
         "checksmith.commands.semgrep",
     }
 
@@ -58,7 +59,7 @@ def test_a_clean_run_of_the_real_ruff_command_passes(
 
     result = command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
 
-    assert result == CheckResult(check_id="lint", severity=None, messages=())
+    assert result == CheckResult(check_id="lint", status=CheckStatus.PASSED, messages=())
 
 
 # Reading ruff's JSON
@@ -134,7 +135,7 @@ def test_a_clean_report_is_a_passing_check() -> None:
     """Ruff having found nothing is an empty array, and exit zero."""
     assert read_ruff(stdout="[]", exit_code=0, stderr="") == CheckResult(
         check_id="lint",
-        severity=None,
+        status=CheckStatus.PASSED,
         messages=(),
     )
 
@@ -151,7 +152,7 @@ def test_each_diagnostic_becomes_a_finding_against_the_project_root() -> None:
 
 def test_a_report_with_diagnostics_is_a_failing_check() -> None:
     """The findings are the report, so having any of them is the failure."""
-    assert read_ruff(stdout=RUFF_REPORT, exit_code=1, stderr="").severity is ErrorSeverity.FAILURE
+    assert read_ruff(stdout=RUFF_REPORT, exit_code=1, stderr="").status is CheckStatus.FAILED
 
 
 def test_a_diagnostic_that_names_no_rule_omits_the_code() -> None:

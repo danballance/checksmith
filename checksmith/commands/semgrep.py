@@ -6,7 +6,7 @@ from typing import Final
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from checksmith.commands.command import Command
-from checksmith.dtos import CheckResult, CommandName, ErrorSeverity
+from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
 logger = logging.getLogger(__name__)
@@ -91,7 +91,7 @@ class SemgrepCommand(Command):
         logger.debug("%s read %d semgrep diagnostics", check_id, len(findings))
         return CheckResult(
             check_id=check_id,
-            severity=ErrorSeverity.FAILURE if findings else None,
+            status=CheckStatus.FAILED if findings else CheckStatus.PASSED,
             messages=findings,
         )
 

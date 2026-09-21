@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from checksmith.commands.command import Command
+from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.registry import CommandFactory
 from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
@@ -18,6 +19,7 @@ def test_importing_the_registry_loads_each_command_implementation(
 
     assert {
         "checksmith.commands.command",
+        "checksmith.commands.import_linter",
         "checksmith.commands.registry",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
@@ -29,6 +31,7 @@ def test_importing_the_registry_loads_each_command_implementation(
     [
         (CommandName.RUFF, RuffCommand),
         (CommandName.SEMGREP, SemgrepCommand),
+        (CommandName.IMPORT_LINTER, ImportLinterCommand),
     ],
 )
 def test_the_configured_command_selects_the_class_that_handles_it(

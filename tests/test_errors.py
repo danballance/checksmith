@@ -8,6 +8,7 @@ from checksmith.dtos import CommandName
 from checksmith.errors import (
     CheckExecutionError,
     CheckOutputError,
+    CheckPrerequisiteError,
     ChecksmithError,
     ConfigSchemaError,
     ConfigSyntaxError,
@@ -118,7 +119,7 @@ def test_a_syntax_error_is_exactly_the_message_it_was_given() -> None:
     )
 
     assert str(error) == (
-        'expected a mapping at the top level in '
+        "expected a mapping at the top level in "
         '"/workspace/project/.checksmith/checksmith.yaml", found list'
     )
     assert error.config_file == CONFIG_PATH
@@ -221,3 +222,25 @@ def test_an_output_error_is_not_an_execution_error() -> None:
     """A process that ran and one that never started are separate diagnoses."""
     assert not isinstance(output_error(), CheckExecutionError)
     assert not isinstance(execution_error(), CheckOutputError)
+
+
+def test_a_prerequisite_error_identifies_the_check_command_and_config() -> None:
+    config_file = PROJECT_ROOT / "pyproject.toml"
+    error = CheckPrerequisiteError(
+        check_id="architecture",
+        command=CommandName.IMPORT_LINTER,
+        config_file=config_file,
+        problem="Invalid TOML at line 2",
+    )
+
+    assert isinstance(error, ChecksmithError)
+    assert not isinstance(error, CheckExecutionError | CheckOutputError)
+    assert error.check_id == "architecture"
+    assert error.command is CommandName.IMPORT_LINTER
+    assert error.config_file == config_file
+    assert error.problem == "Invalid TOML at line 2"
+    assert str(error) == (
+        "Check 'architecture': could not determine whether import-linter is "
+        "runnable using /workspace/project/pyproject.toml:\n"
+        "Invalid TOML at line 2"
+    )

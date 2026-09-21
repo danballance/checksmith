@@ -24,9 +24,11 @@ class ExitCode(IntEnum):
     """Checksmith could not complete the operation."""
 
 
-class ErrorSeverity(StrEnum):
-    FAILURE = "failure"
+class CheckStatus(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
     ERROR = "error"
+    SKIPPED = "skipped"
 
 
 class CheckResult(BaseModel):
@@ -35,7 +37,7 @@ class CheckResult(BaseModel):
     check_id: str
     """The check's id, as the config file declares it."""
 
-    severity: ErrorSeverity | None
+    status: CheckStatus
 
     messages: tuple[str, ...]
 
@@ -57,3 +59,5 @@ class CommandName(StrEnum):
     """Ruff, a Python linter and formatter."""
 
     SEMGREP = "semgrep"
+
+    IMPORT_LINTER = "import-linter"
