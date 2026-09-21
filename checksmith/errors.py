@@ -14,7 +14,7 @@ class DiagnosticContext(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    config_path: Path
+    config_file: Path
     """Config file the problem belongs to. Nothing fails before one is named."""
 
     check_id: str | None
@@ -35,7 +35,7 @@ class DiagnosticContext(BaseModel):
             else [f"{prefix}{summary}:", detail]
         )
         lines.extend(f"  {note}" for note in notes)
-        lines.append(f"  in {self.config_path}")
+        lines.append(f"  in {self.config_file}")
         return "\n".join(lines)
 
 
@@ -74,8 +74,8 @@ class ConfigSyntaxError(ChecksmithError):
     would print the path a second time.
     """
 
-    def __init__(self, *, config_path: Path, problem: str) -> None:
-        self.config_path = config_path
+    def __init__(self, *, config_file: Path, problem: str) -> None:
+        self.config_file = config_file
         self.problem = problem
         super().__init__(problem)
 
@@ -103,12 +103,12 @@ class ConfigSchemaError(ConfigurationError):
     def __init__(
         self,
         *,
-        config_path: Path,
+        config_file: Path,
         violations: tuple[SchemaViolation, ...],
     ) -> None:
         self.violations = violations
         super().__init__(
-            context=DiagnosticContext(config_path=config_path, check_id=None),
+            context=DiagnosticContext(config_file=config_file, check_id=None),
             summary="The config file does not match the Checksmith schema",
             detail=None,
             notes=tuple(

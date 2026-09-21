@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from checksmith.config import Config
+from checksmith.config import Config, ConfigPath
 from checksmith.dtos import CommandName, PackageType
 
 
@@ -40,7 +40,7 @@ def test_the_starter_config_loads_through_the_real_loader(
     default_assets: Path,
 ) -> None:
     config = Config.from_path(
-        config_path=default_assets / "checksmith.yaml",
+        config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
@@ -52,31 +52,35 @@ def test_the_starter_config_loads_through_the_real_loader(
 def test_the_starter_config_references_only_files_it_ships_with(
     default_assets: Path,
 ) -> None:
-    """Nothing resolves these arguments, so the test has to check them itself.
+    """A wheel whose packaged data stopped matching would ship a config
+    pointing at a file that is not in the distribution.
 
-    Without it, a wheel whose packaged data stopped matching would ship a
-    config pointing at a file that is not in the distribution.
+    The loader resolves a ``config_path`` argument, so the test reads the answer
+    rather than recomputing it: what it checks is the path the tool is handed.
     """
     config = Config.from_path(
-        config_path=default_assets / "checksmith.yaml",
+        config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
     for check, filename in zip(
         config.checks, ("ruff.toml", "semgrep.yaml"), strict=True
     ):
-        args = check.args
-        tool_config = config.project_root / args[args.index("--config") + 1]
+        paths = tuple(
+            argument.config_path
+            for argument in check.args
+            if isinstance(argument, ConfigPath)
+        )
 
-        assert tool_config == default_assets / filename
-        assert tool_config.is_file()
+        assert paths == (default_assets / filename,)
+        assert paths[0].is_file()
 
 
 def test_the_starter_config_builds_a_ruff_invocation(
     default_assets: Path,
 ) -> None:
     config = Config.from_path(
-        config_path=default_assets / "checksmith.yaml",
+        config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
@@ -87,9 +91,11 @@ def test_the_starter_config_builds_a_ruff_invocation(
         "ruff",
         "check",
         "--config",
-        "./checksmith/assets/default/ruff.toml",
+        # Absolute, and so independent of the project root the tool runs in.
+        str(default_assets / "ruff.toml"),
         "--output-format",
         "json",
+        # Relative, and so read by ruff against that project root.
         ".",
     )
 
@@ -98,7 +104,7 @@ def test_the_starter_config_builds_a_semgrep_invocation(
     default_assets: Path,
 ) -> None:
     config = Config.from_path(
-        config_path=default_assets / "checksmith.yaml",
+        config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
@@ -109,7 +115,7 @@ def test_the_starter_config_builds_a_semgrep_invocation(
         "semgrep",
         "scan",
         "--config",
-        "./checksmith/assets/default/semgrep.yaml",
+        str(default_assets / "semgrep.yaml"),
         "--json",
         "--error",
         "--strict",
@@ -126,7 +132,7 @@ def test_the_starter_config_asks_for_the_output_its_command_reads(
     switch itself, and this is what pairs it with :class:`RuffCommand`.
     """
     config = Config.from_path(
-        config_path=default_assets / "checksmith.yaml",
+        config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
@@ -139,7 +145,7 @@ def test_the_starter_config_asks_for_the_output_its_command_reads(
 
 def test_the_starter_checks_use_the_python_package_type(default_assets: Path) -> None:
     config = Config.from_path(
-        config_path=default_assets / "checksmith.yaml",
+        config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 

@@ -127,9 +127,9 @@ def test_a_check_that_found_something_reports_it_and_exits_unhealthy(
     assert "src/app.py:1:8" in result.stdout
 
 
-def test_check_accepts_an_absolute_config_path(
+def test_check_accepts_an_absolute_config_file(
     cli_runner: CliRunner,
-    config_path: Path,
+    config_file: Path,
     config_tree: Path,
     tmp_path: Path,
     processes: FakeProcesses,
@@ -141,7 +141,7 @@ def test_check_accepts_an_absolute_config_path(
     monkeypatch.chdir(elsewhere)
     processes.stdout = "[]"
 
-    result = cli_runner.invoke(app, ["check", "--config", str(config_path)])
+    result = cli_runner.invoke(app, ["check", "--config", str(config_file)])
 
     assert processes.started[0].cwd == config_tree
     assert result.exit_code == ExitCode.SUCCESS
@@ -170,7 +170,7 @@ def test_a_tool_that_cannot_scan_is_reported_as_an_error_row(
 
 
 @pytest.fixture
-def semgrep_config_path(tmp_path: Path) -> Path:
+def semgrep_config_file(tmp_path: Path) -> Path:
     path = tmp_path / "checksmith.yaml"
     path.write_text(
         "schema_version: 1\n"
@@ -188,19 +188,19 @@ def semgrep_config_path(tmp_path: Path) -> Path:
 
 def test_cli_reports_a_clean_semgrep_scan(
     cli_runner: CliRunner,
-    semgrep_config_path: Path,
+    semgrep_config_file: Path,
     processes: FakeProcesses,
 ) -> None:
     processes.stdout = '{"results": [], "errors": []}'
 
     result = cli_runner.invoke(
         app,
-        ["check", "--config", str(semgrep_config_path), "--format", "json"],
+        ["check", "--config", str(semgrep_config_file), "--format", "json"],
     )
 
     assert result.exit_code == ExitCode.SUCCESS
     assert result.stderr == ""
-    assert processes.started[0].cwd == semgrep_config_path.parent
+    assert processes.started[0].cwd == semgrep_config_file.parent
     assert json.loads(result.stdout) == {
         "results": [{"check_id": "function-style", "severity": None, "messages": []}]
     }
@@ -209,7 +209,7 @@ def test_cli_reports_a_clean_semgrep_scan(
 @pytest.mark.parametrize("tool_exit_code", [0, 1])
 def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
     cli_runner: CliRunner,
-    semgrep_config_path: Path,
+    semgrep_config_file: Path,
     processes: FakeProcesses,
     tool_exit_code: int,
 ) -> None:
@@ -230,7 +230,7 @@ def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
 
     result = cli_runner.invoke(
         app,
-        ["check", "--config", str(semgrep_config_path), "--format", "json"],
+        ["check", "--config", str(semgrep_config_file), "--format", "json"],
     )
 
     assert result.exit_code == ExitCode.UNHEALTHY
@@ -264,7 +264,7 @@ def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
 )
 def test_cli_reports_semgrep_scan_failures_as_errors(
     cli_runner: CliRunner,
-    semgrep_config_path: Path,
+    semgrep_config_file: Path,
     processes: FakeProcesses,
     tool_exit_code: int,
     stdout: str,
@@ -276,7 +276,7 @@ def test_cli_reports_semgrep_scan_failures_as_errors(
 
     result = cli_runner.invoke(
         app,
-        ["check", "--config", str(semgrep_config_path)],
+        ["check", "--config", str(semgrep_config_file)],
     )
 
     assert result.exit_code == ExitCode.ERROR
@@ -304,8 +304,8 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
         )
         for check_id in check_ids
     )
-    config_path = tmp_path / "checksmith.yaml"
-    config_path.write_text(
+    config_file = tmp_path / "checksmith.yaml"
+    config_file.write_text(
         yaml.safe_dump(
             {
                 "schema_version": 1,
@@ -346,7 +346,7 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
 
     result = cli_runner.invoke(
         app,
-        ["check", "--config", str(config_path), "--format", fmt.value],
+        ["check", "--config", str(config_file), "--format", fmt.value],
     )
 
     assert result.exit_code == ExitCode.ERROR
@@ -380,17 +380,17 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
 
 def test_an_unexpected_tool_adapter_bug_reaches_the_cli_error_boundary(
     cli_runner: CliRunner,
-    config_path: Path,
+    config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
         assert command.name is check.command
-        assert project_root == config_path.parent.parent
+        assert project_root == config_file.parent.parent
         raise RuntimeError("adapter bug")
 
     monkeypatch.setattr(Command, "run", run)
 
-    result = cli_runner.invoke(app, ["check", "--config", str(config_path)])
+    result = cli_runner.invoke(app, ["check", "--config", str(config_file)])
 
     assert result.exit_code == ExitCode.ERROR
     assert result.stdout == ""
@@ -534,7 +534,7 @@ def test_an_authored_diagnostic_is_not_labelled_with_its_class(
 
     def empty() -> None:
         raise ConfigSyntaxError(
-            config_path=Path("/project/.checksmith/checksmith.yaml"),
+            config_file=Path("/project/.checksmith/checksmith.yaml"),
             problem=(
                 'expected a mapping at the top level in '
                 '"/project/.checksmith/checksmith.yaml", found NoneType'

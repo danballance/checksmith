@@ -9,6 +9,7 @@ from typing import Final, Self, cast
 import yaml
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     StrictInt,
     ValidationError,
@@ -29,6 +30,43 @@ logger = logging.getLogger(__name__)
 SUPPORTED_SCHEMA_VERSION: Final = 1
 
 
+class ConfigPath(BaseModel):
+    """Argument naming a file relative to the checksmith config file."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    config_path: Path
+
+    @field_validator("config_path")
+    @classmethod
+    def _resolves_against_the_config_directory(
+        cls,
+        value: Path,
+        info: ValidationInfo,
+    ) -> Path:
+        """Resolve the path against the directory holding the config file.
+        Absolute, because the result is handed to a process whose working
+        directory is the project root.
+        """
+        config_file = info.context
+        if not isinstance(config_file, Path):
+            # Not a config error, so not a ``ValueError``: a complaint against
+            # ``config_path`` would send a user to edit a line that is fine.
+            raise TypeError(
+                "Config must be validated with the config path as context; "
+                "build one with Config.from_mapping"
+            )
+        return Path(os.path.normpath(config_file.parent / value))
+
+
+type Argument = str | ConfigPath
+"""One entry in a check's argument list.
+
+A bare string reaches the tool verbatim, so a target such as ``.`` still means
+what the tool reads it as: a path relative to the project root it runs in.
+"""
+
+
 class Check(BaseModel):
     """A single check: one configuration of one command.
     Two checks may name the same command and differ only in their arguments.
@@ -38,7 +76,7 @@ class Check(BaseModel):
     package_type: PackageType
     package: str = Field(min_length=1)
     command: CommandName
-    args: tuple[str, ...]
+    args: tuple[Argument, ...]
 
     @field_validator("package")
     @classmethod
@@ -60,11 +98,19 @@ class Check(BaseModel):
         An argument *vector*, never a command string: nothing here is ever
         handed to a shell, so a path containing a space or a quote needs no
         escaping and gets none.
+
+        A :class:`ConfigPath` was resolved when it was validated, so flattening
+        it here is only stringification: by this point every argument is
+        something the tool can be handed as it stands.
         """
+        arguments = tuple(
+            argument if isinstance(argument, str) else str(argument.config_path)
+            for argument in self.args
+        )
         return Package.from_name(name=self.package_type).build_argv(
             package=self.package,
             command=self.command.value,
-            arguments=self.args,
+            arguments=arguments,
         )
 
 
@@ -95,15 +141,15 @@ class Config(BaseModel):
         ``..`` names the directory above ``.checksmith``, not the directory
         above wherever the user happened to be located.
         """
-        config_path = info.context
-        if not isinstance(config_path, Path):
+        config_file = info.context
+        if not isinstance(config_file, Path):
             # Not a config error, so not a ``ValueError``: a complaint against
             # ``project_root`` would send a user to edit a line that is fine.
             raise TypeError(
                 "Config must be validated with the config path as context; "
                 "build one with Config.from_mapping"
             )
-        return Path(os.path.normpath(config_path.parent / value))
+        return Path(os.path.normpath(config_file.parent / value))
 
     @field_validator("checks")
     @classmethod
@@ -123,11 +169,11 @@ class Config(BaseModel):
             with path.open(encoding="utf-8") as stream:
                 document = yaml.safe_load(stream)
         except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
-            raise ConfigSyntaxError(config_path=path, problem=str(error)) from error
+            raise ConfigSyntaxError(config_file=path, problem=str(error)) from error
         if not isinstance(document, Mapping):
             # An empty file parses to ``None``, which lands here too.
             raise ConfigSyntaxError(
-                config_path=path,
+                config_file=path,
                 problem=(
                     f'expected a mapping at the top level in "{path}", '
                     f"found {type(document).__name__}"
@@ -141,7 +187,7 @@ class Config(BaseModel):
         return document
 
     @classmethod
-    def from_path(cls, *, config_path: Path, working_directory: Path) -> Self:
+    def from_path(cls, *, config_file: Path, working_directory: Path) -> Self:
         """Turn a ``--config`` argument into a configuration, or fail saying why.
 
         Two base directories are in play and are not interchangeable: the
@@ -149,33 +195,33 @@ class Config(BaseModel):
         own, which everything inside the file resolves against.
         """
         base_directory = working_directory
-        value = str(config_path)
+        value = str(config_file)
         path = Path(os.path.normpath(base_directory / value))
         logger.debug("resolving %s against %s -> %s", value, base_directory, path)
-        return cls.from_mapping(document=cls._read(path=path), config_path=path)
+        return cls.from_mapping(document=cls._read(path=path), config_file=path)
 
     @classmethod
     def from_mapping(
         cls,
         *,
         document: Mapping[object, object],
-        config_path: Path,
+        config_file: Path,
     ) -> Self:
         logger.debug(
             "validating %s against schema version %d",
-            config_path,
+            config_file,
             SUPPORTED_SCHEMA_VERSION,
         )
         try:
-            config = cls.model_validate(document, context=config_path)
+            config = cls.model_validate(document, context=config_file)
         except ValidationError as error:
             logger.debug(
                 "%s rejected: %d schema violations",
-                config_path,
+                config_file,
                 error.error_count(),
             )
             raise ConfigSchemaError(
-                config_path=config_path,
+                config_file=config_file,
                 violations=tuple(
                     SchemaViolation(
                         field=".".join(str(part) for part in detail["loc"]),

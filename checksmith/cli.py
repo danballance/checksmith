@@ -69,18 +69,7 @@ class ChecksmithGroup(TyperGroup):
     """The root group: takes the debug switch anywhere, and owns the error boundary."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        """Move a debug flag to the front, where the root parser will see it.
-
-        ``TyperGroup`` sets ``allow_interspersed_args = False``, so Click stops
-        reading root options at the subcommand name. Hoisting the token is what
-        lets ``checksmith check --config c.yaml --debug`` mean the same thing as
-        ``checksmith --debug check --config c.yaml``, while the switch stays
-        declared exactly once, on the root callback.
-
-        Anything after ``--`` is an argument rather than a flag, and is left
-        where it was. Repeats collapse to the first, and the spelling the user
-        typed is the one kept, so Click's own diagnostics quote it back.
-        """
+        """Move a debug flag to the front, where the root parser will see it."""
         end = args.index("--") if "--" in args else len(args)
         head, tail = args[:end], args[end:]
         flag = next((token for token in head if token in DEBUG_FLAGS), None)
@@ -182,12 +171,12 @@ def init() -> None:
 
 @app.command("check")
 def check(
-    config_path: ConfigOption,
+    config_file: ConfigOption,
     fmt: FormatOption = OutputFormat.TEXT,
 ) -> None:
     """Execute the project's configured checks and report their results."""
     config = Config.from_path(
-        config_path=config_path,
+        config_file=config_file,
         working_directory=Path.cwd(),
     )
     runner = Runner(

@@ -41,7 +41,7 @@ def output_error() -> CheckOutputError:
 
 
 def context(*, check_id: str | None) -> DiagnosticContext:
-    return DiagnosticContext(config_path=CONFIG_PATH, check_id=check_id)
+    return DiagnosticContext(config_file=CONFIG_PATH, check_id=check_id)
 
 
 def test_a_full_diagnostic_reads_as_the_contract_describes() -> None:
@@ -113,7 +113,7 @@ def test_every_diagnostic_names_the_config_it_came_from() -> None:
 def test_a_syntax_error_is_exactly_the_message_it_was_given() -> None:
     """It is PyYAML's text or the OS's; rewording or decorating it adds nothing."""
     error = ConfigSyntaxError(
-        config_path=CONFIG_PATH,
+        config_file=CONFIG_PATH,
         problem=f'expected a mapping at the top level in "{CONFIG_PATH}", found list',
     )
 
@@ -121,12 +121,12 @@ def test_a_syntax_error_is_exactly_the_message_it_was_given() -> None:
         'expected a mapping at the top level in '
         '"/workspace/project/.checksmith/checksmith.yaml", found list'
     )
-    assert error.config_path == CONFIG_PATH
+    assert error.config_file == CONFIG_PATH
 
 
 def test_a_schema_error_renders_one_line_per_violation() -> None:
     error = ConfigSchemaError(
-        config_path=CONFIG_PATH,
+        config_file=CONFIG_PATH,
         violations=(
             SchemaViolation(
                 field="schema_version",
@@ -146,7 +146,7 @@ def test_a_schema_error_renders_one_line_per_violation() -> None:
 
 def test_a_schema_error_with_one_violation_renders_one_line() -> None:
     error = ConfigSchemaError(
-        config_path=CONFIG_PATH,
+        config_file=CONFIG_PATH,
         violations=(SchemaViolation(field="checks", message="Field required"),),
     )
 
@@ -156,8 +156,8 @@ def test_a_schema_error_with_one_violation_renders_one_line() -> None:
 @pytest.mark.parametrize(
     "error",
     [
-        ConfigSyntaxError(config_path=CONFIG_PATH, problem="unreadable"),
-        ConfigSchemaError(config_path=CONFIG_PATH, violations=()),
+        ConfigSyntaxError(config_file=CONFIG_PATH, problem="unreadable"),
+        ConfigSchemaError(config_file=CONFIG_PATH, violations=()),
     ],
 )
 def test_every_configuration_problem_is_a_checksmith_error(
@@ -179,11 +179,11 @@ def test_only_the_errors_checksmith_words_itself_are_configuration_errors() -> N
     carries the path that the shared renderer would append.
     """
     assert not isinstance(
-        ConfigSyntaxError(config_path=CONFIG_PATH, problem="unreadable"),
+        ConfigSyntaxError(config_file=CONFIG_PATH, problem="unreadable"),
         ConfigurationError,
     )
     assert isinstance(
-        ConfigSchemaError(config_path=CONFIG_PATH, violations=()),
+        ConfigSchemaError(config_file=CONFIG_PATH, violations=()),
         ConfigurationError,
     )
     assert not isinstance(execution_error(), ConfigurationError)

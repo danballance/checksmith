@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from checksmith.config import Check, Config
+from checksmith.config import Argument, Check, Config, ConfigPath
 from checksmith.dtos import CommandName, PackageType
 from checksmith.errors import ConfigSchemaError, ConfigSyntaxError
 
@@ -40,7 +40,7 @@ def document(**overrides: Any) -> dict[object, Any]:
 
 
 def parse(body: Mapping[object, Any]) -> Config:
-    return Config.from_mapping(document=body, config_path=CONFIG_PATH)
+    return Config.from_mapping(document=body, config_file=CONFIG_PATH)
 
 
 def reject(body: Mapping[object, Any]) -> ConfigSchemaError:
@@ -61,7 +61,7 @@ def load(tmp_path: Path) -> Callable[[str], Config]:
     def _load(text: str) -> Config:
         path = tmp_path / "checksmith.yaml"
         path.write_text(text, encoding="utf-8")
-        return Config.from_path(config_path=path, working_directory=tmp_path)
+        return Config.from_path(config_file=path, working_directory=tmp_path)
 
     return _load
 
@@ -153,7 +153,7 @@ def test_a_config_that_is_not_there_is_rejected(tmp_path: Path) -> None:
     absent = tmp_path / "absent.yaml"
 
     with pytest.raises(ConfigSyntaxError) as raised:
-        Config.from_path(config_path=absent, working_directory=tmp_path)
+        Config.from_path(config_file=absent, working_directory=tmp_path)
 
     assert "No such file or directory" in str(raised.value)
     assert str(absent) in str(raised.value)
@@ -166,7 +166,7 @@ def test_a_config_that_cannot_be_read_is_rejected(tmp_path: Path) -> None:
     is a habit people will bring from pointing at the directory.
     """
     with pytest.raises(ConfigSyntaxError) as raised:
-        Config.from_path(config_path=tmp_path, working_directory=tmp_path)
+        Config.from_path(config_file=tmp_path, working_directory=tmp_path)
 
     assert "Is a directory" in str(raised.value)
 
@@ -177,7 +177,7 @@ def test_a_config_that_is_not_utf_8_is_rejected(tmp_path: Path) -> None:
     path.write_bytes(b"schema_version: \xff\xfe\n")
 
     with pytest.raises(ConfigSyntaxError) as raised:
-        Config.from_path(config_path=path, working_directory=tmp_path)
+        Config.from_path(config_file=path, working_directory=tmp_path)
 
     assert "codec can't decode" in str(raised.value)
 
@@ -286,10 +286,14 @@ def test_a_field_of_the_wrong_type_is_not_coerced(value: Any) -> None:
     assert "checks.0.command" in fields_of(reject(body))
 
 
-def test_arguments_must_be_strings() -> None:
+def test_arguments_must_be_strings_or_config_paths() -> None:
+    """Both branches are reported, because the value satisfies neither."""
     body = document(checks=[check(args=["check", 2])])
 
-    assert "checks.0.args.1" in fields_of(reject(body))
+    assert fields_of(reject(body)) == (
+        "checks.0.args.1.str",
+        "checks.0.args.1.ConfigPath",
+    )
 
 
 def test_arguments_are_required() -> None:
@@ -388,7 +392,10 @@ def test_a_value_yaml_implicitly_retyped_is_rejected() -> None:
     """``args: [2021-01-01]`` reaches the schema as a ``date``."""
     body = document(checks=[check(args=[date(2021, 1, 1)])])
 
-    assert fields_of(reject(body)) == ("checks.0.args.0",)
+    assert fields_of(reject(body)) == (
+        "checks.0.args.0.str",
+        "checks.0.args.0.ConfigPath",
+    )
 
 
 @pytest.mark.parametrize("value", [{"a"}, (1, 2)])
@@ -398,16 +405,25 @@ def test_a_value_of_a_type_yaml_can_produce_but_a_config_cannot_use(
     """``!!set`` constructs without complaint under ``SafeLoader``."""
     body = document(checks=[check(args=[value])])
 
-    assert fields_of(reject(body)) == ("checks.0.args.0",)
+    assert fields_of(reject(body)) == (
+        "checks.0.args.0.str",
+        "checks.0.args.0.ConfigPath",
+    )
 
 
 def test_a_self_referential_document_is_rejected_without_recursing() -> None:
-    """A recursive anchor builds a cycle; the schema has finite depth, so it ends."""
+    """A recursive anchor builds a cycle; the schema has finite depth, so it ends.
+
+    A mapping is a candidate ``ConfigPath``, so the cycle is read one level down
+    and stops there: the key it needs is absent, and the key it has is refused.
+    """
     loop: dict[str, Any] = {}
     loop["inner"] = loop
 
     assert fields_of(reject(document(checks=[check(args=[loop])]))) == (
-        "checks.0.args.0",
+        "checks.0.args.0.str",
+        "checks.0.args.0.ConfigPath.config_path",
+        "checks.0.args.0.ConfigPath.inner",
     )
 
 
@@ -454,9 +470,14 @@ def test_a_config_built_without_the_path_as_context_is_refused() -> None:
 # Arguments
 
 
-def arguments_of(argument: str) -> tuple[str, ...]:
+def arguments_of_all(args: list[object]) -> tuple[Argument, ...]:
+    """Parse a config file declaring these arguments, and return what came back."""
+    return parse(document(checks=[check(args=args)])).checks[0].args
+
+
+def arguments_of(argument: object) -> tuple[Argument, ...]:
     """Parse a config file declaring one argument, and return what came back."""
-    return parse(document(checks=[check(args=[argument])])).checks[0].args
+    return arguments_of_all([argument])
 
 
 @pytest.mark.parametrize(
@@ -496,6 +517,92 @@ def test_an_argument_containing_spaces_stays_one_argument() -> None:
 
     assert resolved == ("--config=/my project/.checksmith/ruff.toml",)
     assert len(resolved) == 1
+
+
+# Config paths
+
+
+def config_path_of(value: object) -> Path:
+    """Parse a config file declaring one ``config_path`` argument."""
+    argument = arguments_of({"config_path": value})[0]
+    assert isinstance(argument, ConfigPath)
+    return argument.config_path
+
+
+def test_a_config_path_resolves_against_the_config_directory() -> None:
+    """The rule ``project_root`` follows, applied to an argument.
+
+    This is what the whole arrangement buys: the file is named as it sits on
+    disk, beside the config file, rather than by a route out to the project
+    root and back.
+    """
+    assert config_path_of("ruff.toml") == CONFIG_PATH.parent / "ruff.toml"
+
+
+def test_a_config_path_is_absolute_so_the_project_root_cannot_change_it() -> None:
+    """The tool runs in the project root; an absolute path is immune to it."""
+    assert config_path_of("ruff.toml").is_absolute()
+
+
+def test_a_config_path_may_climb_out_of_the_config_directory() -> None:
+    """Normalised lexically, as ``project_root`` is, and not against the disk."""
+    assert config_path_of("../shared/ruff.toml") == Path("/project/shared/ruff.toml")
+
+
+def test_a_config_path_that_is_already_absolute_is_left_alone() -> None:
+    assert config_path_of("/etc/checksmith/ruff.toml") == Path(
+        "/etc/checksmith/ruff.toml"
+    )
+
+
+def test_a_config_path_reaches_the_vector_as_a_plain_string() -> None:
+    """Whatever the schema models it as, a process is handed strings."""
+    check_ = parse(
+        document(checks=[check(args=["--config", {"config_path": "ruff.toml"}])])
+    ).checks[0]
+
+    assert check_.argv[-1] == "/project/.checksmith/ruff.toml"
+    assert all(isinstance(item, str) for item in check_.argv)
+
+
+def test_bare_arguments_beside_a_config_path_are_still_passed_through() -> None:
+    """The two forms coexist: only the marked one is resolved.
+
+    ``.`` is the case that matters. It is a path too, but it is the tool's to
+    read against the project root, and resolving it would change what is
+    scanned.
+    """
+    arguments = arguments_of_all(
+        ["check", "--config", {"config_path": "ruff.toml"}, "."]
+    )
+
+    assert arguments[0] == "check"
+    assert arguments[1] == "--config"
+    assert isinstance(arguments[2], ConfigPath)
+    assert arguments[3] == "."
+
+
+def test_a_config_path_with_an_unknown_key_is_rejected() -> None:
+    """A misspelling must not read as a mapping with the real key missing."""
+    body = document(checks=[check(args=[{"config_path": "ruff.toml", "extra": 1}])])
+
+    assert "checks.0.args.0.ConfigPath.extra" in fields_of(reject(body))
+
+
+def test_a_config_path_naming_no_path_is_rejected() -> None:
+    body = document(checks=[check(args=[{}])])
+
+    assert "checks.0.args.0.ConfigPath.config_path" in fields_of(reject(body))
+
+
+def test_a_config_path_cannot_be_built_without_the_config_file() -> None:
+    """A ``TypeError``, not a violation: there is no line for a user to edit.
+
+    The same refusal :attr:`Config.project_root` makes, for the same reason ---
+    an unresolved config path is a half-built object, not a bad config file.
+    """
+    with pytest.raises(TypeError, match="config path as context"):
+        ConfigPath.model_validate({"config_path": "ruff.toml"})
 
 
 # The argument vector
@@ -565,7 +672,7 @@ def test_a_relative_option_resolves_against_the_working_directory(
     config_tree: Path,
 ) -> None:
     config = Config.from_path(
-        config_path=Path(".checksmith/checksmith.yaml"),
+        config_file=Path(".checksmith/checksmith.yaml"),
         working_directory=config_tree,
     )
 
@@ -574,7 +681,7 @@ def test_a_relative_option_resolves_against_the_working_directory(
 
 
 def test_an_absolute_option_gives_the_same_result_from_anywhere(
-    config_path: Path,
+    config_file: Path,
     config_tree: Path,
     tmp_path: Path,
 ) -> None:
@@ -582,11 +689,11 @@ def test_an_absolute_option_gives_the_same_result_from_anywhere(
     elsewhere.mkdir(parents=True)
 
     from_project = Config.from_path(
-        config_path=config_path,
+        config_file=config_file,
         working_directory=config_tree,
     )
     from_elsewhere = Config.from_path(
-        config_path=config_path,
+        config_file=config_file,
         working_directory=elsewhere,
     )
 
@@ -608,7 +715,7 @@ def test_a_config_that_declares_no_project_root_loads(
     )
 
     config = Config.from_path(
-        config_path=tmp_path / "checksmith.yaml",
+        config_file=tmp_path / "checksmith.yaml",
         working_directory=tmp_path,
     )
 
@@ -616,37 +723,40 @@ def test_a_config_that_declares_no_project_root_loads(
 
 
 def test_the_arguments_arrive_as_the_config_file_wrote_them(
-    config_path: Path,
+    config_file: Path,
     config_tree: Path,
 ) -> None:
-    config = Config.from_path(config_path=config_path, working_directory=config_tree)
+    """Every argument but the config path is carried through untouched.
 
-    assert config.checks[0].args == (
-        "check",
-        "--config",
-        "./ruff.toml",
-        "--output-format",
-        "json",
-        ".",
+    ``.`` in particular: it is the tool's to read against the project root it
+    runs in, and resolving it here would change what the check scans.
+    """
+    config = Config.from_path(config_file=config_file, working_directory=config_tree)
+    arguments = config.checks[0].args
+
+    assert arguments[:2] == ("check", "--config")
+    assert arguments[2] == ConfigPath.model_validate(
+        {"config_path": "ruff.toml"}, context=config_file
     )
+    assert arguments[3:] == ("--output-format", "json", ".")
     assert config.checks[0].package_type is PackageType.UVX
 
 
 def test_a_sibling_file_nobody_listed_does_not_become_a_check(
-    config_path: Path,
+    config_file: Path,
     config_tree: Path,
 ) -> None:
     """Only config entries enable checks; the directory is not scanned."""
     (config_tree / ".checksmith" / "mypy.ini").write_text("", encoding="utf-8")
     (config_tree / ".checksmith" / "prettier.json").write_text("", encoding="utf-8")
 
-    config = Config.from_path(config_path=config_path, working_directory=config_tree)
+    config = Config.from_path(config_file=config_file, working_directory=config_tree)
 
     assert tuple(item.id for item in config.checks) == ("ruff",)
 
 
 def test_a_supporting_path_that_does_not_exist_still_loads(
-    config_path: Path,
+    config_file: Path,
     config_tree: Path,
 ) -> None:
     """Checksmith carries paths through; it does not check them.
@@ -656,13 +766,15 @@ def test_a_supporting_path_that_does_not_exist_still_loads(
     """
     (config_tree / ".checksmith" / "ruff.toml").unlink()
 
-    config = Config.from_path(config_path=config_path, working_directory=config_tree)
+    config = Config.from_path(config_file=config_file, working_directory=config_tree)
 
-    assert "./ruff.toml" in config.checks[0].args
+    assert config.checks[0].argv[-4] == str(
+        config_tree / ".checksmith" / "ruff.toml"
+    )
 
 
 def test_loading_leaves_native_configurations_byte_for_byte_unchanged(
-    config_path: Path,
+    config_file: Path,
     config_tree: Path,
 ) -> None:
     """Checksmith passes files in place; it never rewrites or relocates them."""
@@ -672,7 +784,7 @@ def test_loading_leaves_native_configurations_byte_for_byte_unchanged(
     )
     before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in watched}
 
-    Config.from_path(config_path=config_path, working_directory=config_tree)
+    Config.from_path(config_file=config_file, working_directory=config_tree)
 
     after = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in watched}
     assert after == before

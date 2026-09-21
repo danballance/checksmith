@@ -42,7 +42,7 @@ checks:
     args:
       - check
       - --config
-      - ./ruff.toml
+      - config_path: ruff.toml
       - --output-format
       - json
       - .
@@ -70,7 +70,7 @@ def config_tree(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def config_path(config_tree: Path) -> Path:
+def config_file(config_tree: Path) -> Path:
     """The config file inside :func:`config_tree`, which every run must name."""
     return config_tree / ".checksmith" / "checksmith.yaml"
 
