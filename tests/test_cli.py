@@ -45,6 +45,7 @@ def test_cli_imports_the_command_factory_and_implementations(
         "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
+        "checksmith.commands.ty",
     } <= modules
 
 
@@ -298,6 +299,151 @@ def test_cli_reports_semgrep_scan_failures_as_errors(
     assert "ERROR" in result.stdout
     assert "Check 'function-style':" in result.stdout
     assert "Could not load semgrep.yaml" in result.stdout
+
+
+@pytest.fixture
+def ty_config_file(tmp_path: Path) -> Path:
+    path = tmp_path / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: .\n"
+        "checks:\n"
+        "  - id: types\n"
+        "    package_type: uvx\n"
+        "    package: ty==0.0.80\n"
+        "    command: ty\n"
+        "    args: [check, --output-format, gitlab, --error-on-warning, .]\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cli_reports_a_clean_ty_check(
+    cli_runner: CliRunner,
+    ty_config_file: Path,
+    processes: FakeProcesses,
+) -> None:
+    processes.stdout = "[]"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(ty_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started[0].cwd == ty_config_file.parent
+    assert processes.started[0].argv == (
+        "uvx",
+        "--from",
+        "ty==0.0.80",
+        "ty",
+        "check",
+        "--output-format",
+        "gitlab",
+        "--error-on-warning",
+        ".",
+    )
+    assert json.loads(result.stdout) == {
+        "results": [{"check_id": "types", "status": "passed", "messages": []}]
+    }
+
+
+@pytest.mark.parametrize(
+    ("tool_exit_code", "severity", "description"),
+    [
+        (1, "critical", "invalid-assignment: Object of type `str` is not assignable"),
+        (0, "minor", "possibly-missing-attribute: Attribute may be missing"),
+        (1, "minor", "possibly-missing-attribute: Attribute may be missing"),
+    ],
+)
+def test_cli_reports_ty_errors_and_warnings_as_unhealthy(
+    cli_runner: CliRunner,
+    ty_config_file: Path,
+    processes: FakeProcesses,
+    tool_exit_code: int,
+    severity: str,
+    description: str,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = json.dumps(
+        [
+            {
+                "description": description,
+                "severity": severity,
+                "location": {
+                    "path": str(ty_config_file.parent / "src" / "app.py"),
+                    "positions": {"begin": {"line": 3, "column": 5}},
+                },
+            }
+        ]
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(ty_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.UNHEALTHY
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "results": [
+            {
+                "check_id": "types",
+                "status": "failed",
+                "messages": [f"src/app.py:3:5 {description}"],
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize("stdout", ["not json", '[{"description": "Missing location"}]'])
+def test_cli_reports_malformed_ty_output_as_an_error(
+    cli_runner: CliRunner,
+    ty_config_file: Path,
+    processes: FakeProcesses,
+    stdout: str,
+) -> None:
+    processes.stdout = stdout
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(ty_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    results = json.loads(result.stdout)["results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "types"
+    assert results[0]["status"] == "error"
+    assert "--output-format gitlab" in results[0]["messages"][0]
+
+
+def test_cli_preserves_ty_execution_failure_output(
+    cli_runner: CliRunner,
+    ty_config_file: Path,
+    processes: FakeProcesses,
+) -> None:
+    processes.exit_code = 2
+    processes.stdout = "Diagnostic details from stdout"
+    processes.stderr = "Could not read the project configuration"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(ty_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    results = json.loads(result.stdout)["results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "types"
+    assert results[0]["status"] == "error"
+    message = results[0]["messages"][0]
+    assert "Check 'types': ty exited 2" in message
+    assert "Diagnostic details from stdout" in message
+    assert "Could not read the project configuration" in message
 
 
 @pytest.fixture

@@ -66,6 +66,7 @@ def test_importing_import_linter_does_not_load_other_command_implementations(
         "checksmith.commands.registry",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
+        "checksmith.commands.ty",
         "importlinter",
     }
 

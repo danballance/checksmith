@@ -46,7 +46,7 @@ def test_the_starter_config_loads_through_the_real_loader(
 
     # ``project_root: ../../..`` resolves against the config directory.
     assert config.project_root == default_assets.parents[2]
-    assert tuple(check.id for check in config.checks) == ("ruff", "semgrep")
+    assert tuple(check.id for check in config.checks) == ("ruff", "semgrep", "ty")
 
 
 def test_the_starter_config_references_only_files_it_ships_with(
@@ -63,8 +63,8 @@ def test_the_starter_config_references_only_files_it_ships_with(
         working_directory=default_assets,
     )
 
-    for check, filename in zip(
-        config.checks, ("ruff.toml", "semgrep.yaml"), strict=True
+    for check, filenames in zip(
+        config.checks, (("ruff.toml",), ("semgrep.yaml",), ()), strict=True
     ):
         paths = tuple(
             argument.config_path
@@ -72,8 +72,8 @@ def test_the_starter_config_references_only_files_it_ships_with(
             if isinstance(argument, ConfigPath)
         )
 
-        assert paths == (default_assets / filename,)
-        assert paths[0].is_file()
+        assert paths == tuple(default_assets / filename for filename in filenames)
+        assert all(path.is_file() for path in paths)
 
 
 def test_the_starter_config_builds_a_ruff_invocation(
@@ -141,6 +141,28 @@ def test_the_starter_config_asks_for_the_output_its_command_reads(
     assert "json" in config.checks[0].args
     assert config.checks[1].command is CommandName.SEMGREP
     assert "--json" in config.checks[1].args
+    assert config.checks[2].command is CommandName.TY
+    assert "--output-format" in config.checks[2].args
+    assert "gitlab" in config.checks[2].args
+
+
+def test_the_starter_config_builds_a_ty_invocation(default_assets: Path) -> None:
+    config = Config.from_path(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+
+    assert config.checks[2].argv == (
+        "uvx",
+        "--from",
+        "ty==0.0.80",
+        "ty",
+        "check",
+        "--output-format",
+        "gitlab",
+        "--error-on-warning",
+        ".",
+    )
 
 
 def test_the_starter_checks_use_the_python_package_type(default_assets: Path) -> None:

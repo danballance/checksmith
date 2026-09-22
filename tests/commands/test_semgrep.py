@@ -25,6 +25,7 @@ def test_importing_semgrep_does_not_load_other_command_implementations(
         "checksmith.commands.registry",
         "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
+        "checksmith.commands.ty",
     }
 
 

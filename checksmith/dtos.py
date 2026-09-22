@@ -61,3 +61,5 @@ class CommandName(StrEnum):
     SEMGREP = "semgrep"
 
     IMPORT_LINTER = "import-linter"
+
+    TY = "ty"

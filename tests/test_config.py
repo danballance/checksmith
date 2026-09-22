@@ -648,6 +648,29 @@ def test_a_semgrep_check_is_accepted_and_builds_a_uvx_vector() -> None:
     )
 
 
+def test_a_ty_check_is_accepted_and_builds_a_uvx_vector() -> None:
+    configured = resolved(
+        id="type-check",
+        package="ty==0.0.80",
+        command="ty",
+        args=["check", "--output-format", "gitlab", "--error-on-warning", "."],
+    )
+
+    assert configured.id == "type-check"
+    assert configured.command is CommandName.TY
+    assert configured.argv == (
+        "uvx",
+        "--from",
+        "ty==0.0.80",
+        "ty",
+        "check",
+        "--output-format",
+        "gitlab",
+        "--error-on-warning",
+        ".",
+    )
+
+
 def test_a_check_with_no_arguments_still_builds_a_runnable_vector() -> None:
     assert resolved(args=[]).argv == ("uvx", "--from", "ruff==0.16.7", "ruff")
 

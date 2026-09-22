@@ -4,6 +4,7 @@ from checksmith.commands.command import Command
 from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
+from checksmith.commands.ty import TyCommand
 from checksmith.dtos import CommandName
 
 
@@ -13,7 +14,7 @@ class CommandFactory:
         """Return the one command that answers to ``name``.
 
         A ``match`` rather than a mapping lookup: a type checker proves this
-        covers every member of :class:`CommandName`, so adding a fourth command
+        covers every member of :class:`CommandName`, so adding another command
         is an error reported here at check time rather than a ``KeyError`` in
         front of a user.
         """
@@ -24,6 +25,8 @@ class CommandFactory:
                 return SemgrepCommand()
             case CommandName.IMPORT_LINTER:
                 return ImportLinterCommand()
+            case CommandName.TY:
+                return TyCommand()
 
     @classmethod
     def registry(cls) -> Mapping[CommandName, Command]:

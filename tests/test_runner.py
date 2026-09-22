@@ -37,6 +37,7 @@ def test_importing_the_runner_does_not_load_command_implementations(
         "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
+        "checksmith.commands.ty",
     }
 
 
@@ -254,7 +255,7 @@ def test_a_run_with_no_checks_at_all_is_rejected() -> None:
         ).check()
 
 
-def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
+def test_a_mixed_suite_uses_each_commands_report_format(
     processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -266,6 +267,13 @@ def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
             package="semgrep==1.176.1",
             command=CommandName.SEMGREP,
             args=("scan", "--json", "--config", ".checksmith/semgrep.yaml", "."),
+        ),
+        Check(
+            id="types",
+            package_type=PackageType.UVX,
+            package="ty==0.0.80",
+            command=CommandName.TY,
+            args=("check", "--output-format", "gitlab", "--error-on-warning", "."),
         ),
     )
 
@@ -282,6 +290,7 @@ def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
         reports = {
             "ruff": "[]",
             "semgrep": '{"results": [], "errors": []}',
+            "ty": "[]",
         }
         processes.stdout = reports[argv[3]]
         return processes.run(
@@ -305,10 +314,12 @@ def test_a_mixed_ruff_and_semgrep_suite_uses_each_commands_report_format(
     assert tuple(process.argv[3] for process in processes.started) == (
         "ruff",
         "semgrep",
+        "ty",
     )
     assert output.results == (
         CheckResult(check_id="lint", status=CheckStatus.PASSED, messages=()),
         CheckResult(check_id="function-style", status=CheckStatus.PASSED, messages=()),
+        CheckResult(check_id="types", status=CheckStatus.PASSED, messages=()),
     )
     assert output.exit_code is ExitCode.SUCCESS
 

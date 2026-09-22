@@ -27,6 +27,7 @@ def test_importing_the_base_does_not_load_command_implementations(
         "checksmith.commands.import_linter",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
+        "checksmith.commands.ty",
     }
 
 
@@ -185,6 +186,7 @@ def test_nothing_is_read_when_nothing_ran(processes: FakeProcesses) -> None:
         (CommandName.RUFF, "ruff==0.16.7"),
         (CommandName.SEMGREP, "semgrep==1.176.1"),
         (CommandName.IMPORT_LINTER, "import-linter==2.15"),
+        (CommandName.TY, "ty==0.0.80"),
     ],
 )
 def test_invalid_utf8_output_is_a_check_output_error(
