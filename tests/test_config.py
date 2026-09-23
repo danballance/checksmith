@@ -671,6 +671,58 @@ def test_a_ty_check_is_accepted_and_builds_a_uvx_vector() -> None:
     )
 
 
+@pytest.mark.parametrize("directory", ["build/pyarchgraph", "/artifacts/pyarchgraph"])
+def test_pyarchgraph_configuration_passes_its_output_root_to_the_adapter(
+    directory: str,
+) -> None:
+    configured = resolved(
+        command="pyarchgraph",
+        package="pyarchgraph==0.4.0",
+        args=[
+            "src",
+            "--project-root",
+            ".",
+            "--output",
+            "json",
+            "--output-dir",
+            directory,
+        ],
+    )
+
+    assert configured.command is CommandName.PYARCHGRAPH
+    assert configured.argv == (
+        "uvx",
+        "--from",
+        "pyarchgraph==0.4.0",
+        "pyarchgraph",
+        "src",
+        "--project-root",
+        ".",
+        "--output",
+        "json",
+        "--output-dir",
+        directory,
+    )
+
+
+def test_shared_check_configuration_has_no_baseline_setting() -> None:
+    assert "baseline_dir" not in Check.model_fields
+
+
+def test_pyarchgraph_can_run_from_its_pinned_git_source() -> None:
+    package = (
+        "pyarchgraph @ git+https://github.com/danballance/pyarchgraph"
+        "@9d48623d405034f6f32b6eb87f059a2713f1e900"
+    )
+    configured = resolved(
+        command="pyarchgraph",
+        package=package,
+        args=["src", "--output", "json", "--output-dir", "build/pyarchgraph"],
+    )
+
+    assert configured.argv[:4] == ("uvx", "--from", package, "pyarchgraph")
+
+
 def test_a_check_with_no_arguments_still_builds_a_runnable_vector() -> None:
     assert resolved(args=[]).argv == ("uvx", "--from", "ruff==0.16.7", "ruff")
 
@@ -791,9 +843,7 @@ def test_a_supporting_path_that_does_not_exist_still_loads(
 
     config = Config.from_path(config_file=config_file, working_directory=config_tree)
 
-    assert config.checks[0].argv[-4] == str(
-        config_tree / ".checksmith" / "ruff.toml"
-    )
+    assert config.checks[0].argv[-4] == str(config_tree / ".checksmith" / "ruff.toml")
 
 
 def test_loading_leaves_native_configurations_byte_for_byte_unchanged(

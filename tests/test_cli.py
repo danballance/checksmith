@@ -43,6 +43,7 @@ def test_cli_imports_the_command_factory_and_implementations(
         "checksmith.commands.registry",
         "checksmith.commands.command",
         "checksmith.commands.import_linter",
+        "checksmith.commands.pyarchgraph",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
         "checksmith.commands.ty",
@@ -78,9 +79,13 @@ def test_no_arguments_shows_help(cli_runner: CliRunner) -> None:
     assert "Usage" in result.stdout
 
 
-def test_check_requires_a_config_to_be_named(cli_runner: CliRunner) -> None:
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_check_requires_a_config_to_be_named(
+    cli_runner: CliRunner,
+    operation: str,
+) -> None:
     """Click owns this one. The error boundary re-raises rather than relabels it."""
-    result = cli_runner.invoke(app, ["check"])
+    result = cli_runner.invoke(app, [operation])
 
     assert result.exit_code == ExitCode.ERROR
     assert "Missing option" in result.stderr
@@ -611,6 +616,37 @@ def test_cli_reports_malformed_import_linter_toml_as_an_error(
         assert "Expected ']'" in result.stdout
 
 
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+def test_prepare_skips_normal_checks_without_loading_their_prerequisites(
+    cli_runner: CliRunner,
+    import_linter_config_file: Path,
+    processes: FakeProcesses,
+    fmt: OutputFormat,
+) -> None:
+    (import_linter_config_file.parent / "pyproject.toml").write_text(
+        "[tool.importlinter\n",
+        encoding="utf-8",
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["prepare", "--config", str(import_linter_config_file), "--format", fmt.value],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started == []
+    if fmt is OutputFormat.JSON:
+        results = json.loads(result.stdout)["results"]
+        assert len(results) == 1
+        assert results[0]["check_id"] == "dependencies"
+        assert results[0]["status"] == "skipped"
+        assert results[0]["messages"]
+    else:
+        assert "dependencies" in result.stdout
+        assert "SKIP" in result.stdout
+
+
 @pytest.mark.parametrize(
     ("pyproject", "first_status", "expected_exit_code"),
     [
@@ -654,11 +690,13 @@ def test_cli_still_runs_later_checks_after_an_import_linter_prerequisite_result(
     assert [entry["status"] for entry in results] == [first_status, "passed"]
 
 
+@pytest.mark.parametrize("operation", ["check", "prepare"])
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 def test_cli_reports_every_check_after_an_individual_tool_error(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
     fmt: OutputFormat,
 ) -> None:
     check_ids = ("first", "violations", "broken", "last")
@@ -710,11 +748,11 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
             raise outcome
         return outcome
 
-    monkeypatch.setattr(Command, "run", run)
+    monkeypatch.setattr(Command, "prepare" if operation == "prepare" else "run", run)
 
     result = cli_runner.invoke(
         app,
-        ["check", "--config", str(config_file), "--format", fmt.value],
+        [operation, "--config", str(config_file), "--format", fmt.value],
     )
 
     assert result.exit_code == ExitCode.ERROR
@@ -765,15 +803,17 @@ def test_an_unexpected_tool_adapter_bug_reaches_the_cli_error_boundary(
     assert "general error: RuntimeError: adapter bug" in result.stderr
 
 
+@pytest.mark.parametrize("operation", ["check", "prepare"])
 def test_check_reports_a_bad_config_option_without_typers_wording(
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    operation: str,
 ) -> None:
     """Typer does no path validation, so the config file is opened before it complains."""
     monkeypatch.chdir(tmp_path)
 
-    result = cli_runner.invoke(app, ["check", "--config", "absent.yaml"])
+    result = cli_runner.invoke(app, [operation, "--config", "absent.yaml"])
 
     assert result.exit_code == ExitCode.ERROR
     # The operating system's own wording, resolved to the absolute path the
@@ -849,8 +889,12 @@ def test_emit_exits_with_the_code_its_output_implies(
     assert raised.value.exit_code == ExitCode.UNHEALTHY
 
 
-def test_check_rejects_an_unknown_format(cli_runner: CliRunner) -> None:
-    result = cli_runner.invoke(app, ["check", "--format", "yaml"])
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_check_rejects_an_unknown_format(
+    cli_runner: CliRunner,
+    operation: str,
+) -> None:
+    result = cli_runner.invoke(app, [operation, "--format", "yaml"])
 
     assert result.exit_code == ExitCode.ERROR
 
@@ -990,6 +1034,7 @@ def test_command_names_match_the_cli_schema() -> None:
         ("agents", "uninstall"),
         ("check",),
         ("init",),
+        ("prepare",),
     }
 
 

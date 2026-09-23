@@ -1,6 +1,8 @@
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Final
+from urllib.parse import urlsplit
 
 import nodesemver
 from packaging.requirements import InvalidRequirement, Requirement
@@ -124,16 +126,12 @@ class UvxPackage(Package):
         return PackageType.UVX
 
     def validate_package(self, *, package: str) -> None:
-        """Reject anything that is not a PEP 508 requirement with a version.
+        """Require a version constraint or a Git HTTPS URL pinned to a commit.
 
         ``packaging`` owns the grammar, so extras and markers are accepted for
-        free: whatever ``uvx --from`` understands, so does Checksmith.
-
-        The specifier check is not redundant. PEP 508 makes ``name @ url`` and a
-        version specifier mutually exclusive, so requiring a specifier is also
-        what rejects ``ruff @ git+https://...`` --- and what rejects
-        ``prettier@3.6.2``, which ``packaging`` happily reads as the package
-        ``prettier`` at the URL ``3.6.2``.
+        versioned requirements and named Git requirements alike. Direct URLs
+        must identify a repository and a full commit, without query or fragment
+        options; branches and tags may change between runs.
         """
         try:
             requirement = Requirement(package)
@@ -141,6 +139,31 @@ class UvxPackage(Package):
             raise ValueError(
                 f"uvx package is not a valid Python requirement: {package!r}"
             ) from error
+        if requirement.url is not None:
+            problem = (
+                "uvx URL package must use git+https with a hostname, repository "
+                "path and full 40-character hexadecimal commit, without query "
+                f"or fragment, got: {package!r}"
+            )
+            try:
+                url = urlsplit(requirement.url)
+                valid_url = (
+                    url.scheme == "git+https"
+                    and url.hostname is not None
+                    and not any(character.isspace() for character in url.netloc)
+                    and "\\" not in url.netloc
+                    and (url.port is None or 1 <= url.port <= 65535)
+                    and re.fullmatch(r"/[^@\s\\]+@[0-9a-fA-F]{40}", url.path)
+                    is not None
+                    and "?" not in requirement.url
+                    and "#" not in requirement.url
+                )
+            except ValueError as error:
+                raise ValueError(problem) from error
+            if not valid_url:
+                raise ValueError(problem)
+            logger.debug("uvx accepted %s, name=%s", package, requirement.name)
+            return
         if len(requirement.specifier) == 0:
             raise ValueError(f"uvx package must constrain a version, got: {package!r}")
         logger.debug(

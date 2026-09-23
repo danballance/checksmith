@@ -214,13 +214,10 @@ def test_a_requirement_naming_no_version_is_rejected(uvx_package: UvxPackage) ->
         uvx_package.validate_package(package="ruff")
 
 
-def test_a_url_requirement_is_rejected_because_it_names_no_version(
+def test_an_unpinned_git_requirement_is_rejected(
     uvx_package: UvxPackage,
 ) -> None:
-    """PEP 508 forbids a URL and a specifier together, so the version rule
-    catches it.
-    """
-    with pytest.raises(ValueError, match="must constrain a version"):
+    with pytest.raises(ValueError, match="full 40-character hexadecimal commit"):
         uvx_package.validate_package(package="ruff @ git+https://example.com/ruff.git")
 
 
@@ -228,8 +225,82 @@ def test_an_npm_specification_is_not_a_python_requirement(
     uvx_package: UvxPackage,
 ) -> None:
     """``packaging`` reads this as the package ``prettier`` at the URL ``3.6.2``."""
-    with pytest.raises(ValueError, match="must constrain a version"):
+    with pytest.raises(ValueError, match="must use git\\+https"):
         uvx_package.validate_package(package="prettier@3.6.2")
+
+
+GIT_COMMIT = "9d48623d405034f6f32b6eb87f059a2713f1e900"
+GIT_REPOSITORY = "git+https://github.com/danballance/pyarchgraph"
+
+
+@pytest.mark.parametrize(
+    "package",
+    [
+        f"pyarchgraph @ {GIT_REPOSITORY}@{GIT_COMMIT}",
+        f"pyarchgraph @ {GIT_REPOSITORY}.git@{GIT_COMMIT.upper()}",
+        f'pyarchgraph[extra] @ {GIT_REPOSITORY}@{GIT_COMMIT} ; python_version >= "3.14"',
+        f"pyarchgraph @ git+https://example.com:8443/project.git@{GIT_COMMIT}",
+    ],
+)
+def test_a_named_git_requirement_pinned_to_a_full_commit_is_accepted(
+    package: str,
+    uvx_package: UvxPackage,
+) -> None:
+    uvx_package.validate_package(package=package)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        GIT_REPOSITORY,
+        f"{GIT_REPOSITORY}@main",
+        f"{GIT_REPOSITORY}@v0.1.0",
+        f"{GIT_REPOSITORY}@{GIT_COMMIT[:7]}",
+        f"{GIT_REPOSITORY}@{'g' * 40}",
+        f"{GIT_REPOSITORY}@{GIT_COMMIT}0",
+        f"{GIT_REPOSITORY}@{GIT_COMMIT}?download=1",
+        f"{GIT_REPOSITORY}@{GIT_COMMIT}?",
+        f"{GIT_REPOSITORY}@{GIT_COMMIT}#subdirectory=src",
+        f"{GIT_REPOSITORY}@{GIT_COMMIT}#",
+        f"https://example.com/project.git@{GIT_COMMIT}",
+        f"git+http://example.com/project.git@{GIT_COMMIT}",
+        f"git+ssh://example.com/project.git@{GIT_COMMIT}",
+        f"git+https:///project.git@{GIT_COMMIT}",
+        f"git+https://example.com/@{GIT_COMMIT}",
+        f"git+https://example.com@{GIT_COMMIT}",
+        f"git+https://[invalid/project.git@{GIT_COMMIT}",
+        f"git+https://example.com:invalid/project.git@{GIT_COMMIT}",
+        f"git+https://example.com:65536/project.git@{GIT_COMMIT}",
+        f"git+https://example.com:0/project.git@{GIT_COMMIT}",
+        f"git+https://example.com\\repository/project.git@{GIT_COMMIT}",
+    ],
+)
+def test_git_sources_outside_the_pinned_https_scope_are_rejected(
+    url: str,
+    uvx_package: UvxPackage,
+) -> None:
+    with pytest.raises(ValueError, match="full 40-character hexadecimal commit"):
+        uvx_package.validate_package(package=f"pyarchgraph @ {url}")
+
+
+def test_a_git_requirement_reaches_uvx_unchanged(uvx_package: UvxPackage) -> None:
+    package = f"pyarchgraph @ {GIT_REPOSITORY}@{GIT_COMMIT}"
+
+    argv = uvx_package.build_argv(
+        package=package,
+        command="pyarchgraph",
+        arguments=("src", "--output", "json"),
+    )
+
+    assert argv == (
+        "uvx",
+        "--from",
+        package,
+        "pyarchgraph",
+        "src",
+        "--output",
+        "json",
+    )
 
 
 def test_a_requirement_that_does_not_parse_is_rejected(uvx_package: UvxPackage) -> None:

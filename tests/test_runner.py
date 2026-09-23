@@ -35,6 +35,7 @@ def test_importing_the_runner_does_not_load_command_implementations(
     assert not modules & {
         "checksmith.commands.registry",
         "checksmith.commands.import_linter",
+        "checksmith.commands.pyarchgraph",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
         "checksmith.commands.ty",
@@ -102,6 +103,12 @@ class EligibilityCommand(RecordingCommand):
     def run(self, *, check: Check, project_root: Path) -> CheckResult:
         self.calls.append(("run", check, project_root))
         return super().run(check=check, project_root=project_root)
+
+
+class PreparingCommand(EligibilityCommand):
+    def prepare(self, *, check: Check, project_root: Path) -> CheckResult:
+        self.calls.append(("prepare", check, project_root))
+        return RecordingCommand.run(self, check=check, project_root=project_root)
 
 
 def ruff_check(*, check_id: str) -> Check:
@@ -520,3 +527,122 @@ def test_an_unexpected_eligibility_bug_propagates_without_starting_the_check(
 
     assert recorder.calls == [("eligibility", checks[0], PROJECT_ROOT)]
     assert recorder.runs == []
+
+
+def test_prepare_calls_each_hook_once_without_checking_normal_eligibility(
+    checks: tuple[Check, ...],
+) -> None:
+    prepared = tuple(
+        CheckResult(check_id=check.id, status=CheckStatus.PASSED, messages=())
+        for check in checks
+    )
+    recorder = PreparingCommand(
+        results={result.check_id: result for result in prepared},
+        eligibility={},
+    )
+
+    output = Runner(
+        checks=checks,
+        commands={CommandName.RUFF: recorder},
+        project_root=PROJECT_ROOT,
+    ).prepare()
+
+    assert recorder.calls == [("prepare", check, PROJECT_ROOT) for check in checks]
+    assert output.results == prepared
+    assert output.exit_code is ExitCode.SUCCESS
+
+
+def test_prepare_skips_commands_without_a_preparation_hook(
+    checks: tuple[Check, ...],
+    processes: FakeProcesses,
+) -> None:
+    output = Runner(
+        checks=checks,
+        commands=CommandFactory.registry(),
+        project_root=PROJECT_ROOT,
+    ).prepare()
+
+    assert processes.started == []
+    assert tuple(result.check_id for result in output.results) == ("lint", "format")
+    assert all(result.status is CheckStatus.SKIPPED for result in output.results)
+    assert output.exit_code is ExitCode.SUCCESS
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        CheckExecutionError(
+            check_id="broken",
+            program="uvx",
+            working_directory=PROJECT_ROOT,
+            problem="No such file or directory",
+        ),
+        CheckOutputError(
+            check_id="broken",
+            command=CommandName.RUFF,
+            summary="could not prepare",
+            problem="invalid output",
+        ),
+        CheckPrerequisiteError(
+            check_id="broken",
+            command=CommandName.RUFF,
+            config_file=PROJECT_ROOT / "pyproject.toml",
+            problem="invalid configuration",
+        ),
+    ],
+)
+def test_preparation_errors_preserve_results_and_prepare_later_checks(
+    error: CheckExecutionError | CheckOutputError | CheckPrerequisiteError,
+) -> None:
+    passing = CheckResult(check_id="before", status=CheckStatus.PASSED, messages=())
+    later = CheckResult(check_id="after", status=CheckStatus.PASSED, messages=())
+    checks = tuple(
+        ruff_check(check_id=check_id) for check_id in ("before", "broken", "after")
+    )
+    recorder = PreparingCommand(
+        results={"before": passing, "broken": error, "after": later},
+        eligibility={},
+    )
+
+    output = Runner(
+        checks=checks,
+        commands={CommandName.RUFF: recorder},
+        project_root=PROJECT_ROOT,
+    ).prepare()
+
+    assert recorder.calls == [("prepare", check, PROJECT_ROOT) for check in checks]
+    assert output.results == (
+        passing,
+        CheckResult(
+            check_id="broken", status=CheckStatus.ERROR, messages=(str(error),)
+        ),
+        later,
+    )
+    assert output.exit_code is ExitCode.ERROR
+
+
+def test_unexpected_preparation_bugs_propagate(
+    checks: tuple[Check, ...],
+) -> None:
+    recorder = PreparingCommand(
+        results={"lint": RuntimeError("preparation bug")},
+        eligibility={},
+    )
+
+    with pytest.raises(RuntimeError, match="preparation bug"):
+        Runner(
+            checks=checks,
+            commands={CommandName.RUFF: recorder},
+            project_root=PROJECT_ROOT,
+        ).prepare()
+
+    assert recorder.calls == [("prepare", checks[0], PROJECT_ROOT)]
+
+
+def test_prepare_rejects_an_empty_suite() -> None:
+    with pytest.raises(ValueError, match="at least one check"):
+        Runner(
+            checks=(),
+            commands=CommandFactory.registry(),
+            project_root=PROJECT_ROOT,
+        ).prepare()

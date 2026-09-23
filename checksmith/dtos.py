@@ -63,3 +63,5 @@ class CommandName(StrEnum):
     IMPORT_LINTER = "import-linter"
 
     TY = "ty"
+
+    PYARCHGRAPH = "pyarchgraph"

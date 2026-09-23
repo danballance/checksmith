@@ -169,22 +169,34 @@ def init() -> None:
     raise NotImplementedError
 
 
+def _runner_from_config(config_file: Path) -> Runner:
+    config = Config.from_path(
+        config_file=config_file,
+        working_directory=Path.cwd(),
+    )
+    return Runner(
+        checks=config.checks,
+        commands=CommandFactory.registry(),
+        project_root=config.project_root,
+    )
+
+
+@app.command("prepare")
+def prepare(
+    config_file: ConfigOption,
+    fmt: FormatOption = OutputFormat.TEXT,
+) -> None:
+    """Prepare configured checks before coding begins."""
+    _emit(_runner_from_config(config_file).prepare(), fmt)
+
+
 @app.command("check")
 def check(
     config_file: ConfigOption,
     fmt: FormatOption = OutputFormat.TEXT,
 ) -> None:
     """Execute the project's configured checks and report their results."""
-    config = Config.from_path(
-        config_file=config_file,
-        working_directory=Path.cwd(),
-    )
-    runner = Runner(
-        checks=config.checks,
-        commands=CommandFactory.registry(),
-        project_root=config.project_root,
-    )
-    _emit(runner.check(), fmt)
+    _emit(_runner_from_config(config_file).check(), fmt)
 
 
 if __name__ == "__main__":

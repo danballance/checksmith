@@ -16,6 +16,7 @@ command:
     - checksmith agents install
     - checksmith agents uninstall
     - checksmith init
+    - checksmith prepare --config .checksmith/checksmith.yaml
     - checksmith check --config .checksmith/checksmith.yaml
 
   options:
@@ -85,6 +86,42 @@ command:
             kind: Init
       examples:
         - checksmith init
+
+    - name: prepare
+      description: Prepare configured checks before coding begins.
+      interactive: false
+      options:
+        - name: --format
+          description: Select the output format for this command.
+          arguments:
+            - name: format
+              required: true
+              acceptedValues:
+                - text
+                - json
+              description: >-
+                Output format. Use `text` for human-readable console output
+                and `json` for machine-readable output. Defaults to `text`.
+
+        - name: --config
+          required: true
+          description: Select the config file describing the checks to prepare.
+          arguments:
+            - name: config
+              required: true
+              description: >-
+                Path to a config file. A relative path resolves from the
+                caller's current directory.
+      metadata:
+        - name: checksmith.operation
+          value:
+            operationId: prepare
+        - name: checksmith.output
+          value:
+            kind: Check
+      examples:
+        - checksmith prepare --config .checksmith/checksmith.yaml
+        - checksmith prepare --config checksmith.yaml --format json
 
     - name: check
       description: Execute the project's configured checks and report their results.
