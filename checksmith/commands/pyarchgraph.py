@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from stat import S_ISLNK
 from typing import Annotated, Final, Literal, NoReturn
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
@@ -54,6 +55,69 @@ class PyArchGraphReport(BaseModel):
     analysis: PyArchGraphAnalysis
 
 
+class PyArchGraphViolationCounts(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    cyclic_dependency: Annotated[int, Field(strict=True, ge=0)]
+    forbidden_dependency: Annotated[int, Field(strict=True, ge=0)]
+
+
+class PyArchGraphCoverage(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore", strict=True)
+
+    complete: bool
+    scope_valid: bool
+    dependency_resolution_complete: bool
+    nonempty: bool
+
+    @property
+    def problems(self) -> tuple[str, ...]:
+        conditions = (
+            ("complete", self.complete, "analysis is incomplete"),
+            ("scope_valid", self.scope_valid, "source scope is invalid"),
+            (
+                "dependency_resolution_complete",
+                self.dependency_resolution_complete,
+                "dependency resolution is incomplete",
+            ),
+            ("nonempty", self.nonempty, "no modules were analysed"),
+        )
+        return tuple(
+            f"{name}=false ({reason})"
+            for name, satisfied, reason in conditions
+            if not satisfied
+        )
+
+
+class PyArchGraphHealthCleanup(PyArchGraphCleanup):
+    counts: PyArchGraphViolationCounts
+    coverage: PyArchGraphCoverage
+
+
+class PyArchGraphHealthMetrics(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    module_count: Annotated[int, Field(strict=True, ge=0)]
+    dependency_count: Annotated[int, Field(strict=True, ge=0)]
+    cyclic_component_count: Annotated[int, Field(strict=True, ge=0)]
+    cyclic_module_count: Annotated[int, Field(strict=True, ge=0)]
+
+
+class PyArchGraphHealthQuality(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="ignore")
+
+    metrics: PyArchGraphHealthMetrics
+
+
+class PyArchGraphHealthReport(PyArchGraphReport):
+    cleanup: PyArchGraphHealthCleanup
+    quality: PyArchGraphHealthQuality
+
+
+class _PyArchGraphIncompleteAnalysis(CheckOutputError):
+    pass
+
+
 class PyArchGraphPaths(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -74,7 +138,11 @@ class PyArchGraphCommand(Command):
         preparation = check.model_copy(update={"args": paths.preparation_args})
         try:
             super().run(check=preparation, project_root=project_root)
-            report = self._read_report(check=check, path=paths.baseline_report)
+            report = self._read_report(
+                check=check,
+                path=paths.baseline_report,
+                report_type=PyArchGraphReport,
+            )
         except (CheckExecutionError, CheckOutputError):
             self._remove_report(check=check, path=paths.baseline_report)
             raise
@@ -93,11 +161,19 @@ class PyArchGraphCommand(Command):
 
     def run(self, *, check: Check, project_root: Path) -> CheckResult:
         paths = self._paths(check=check, project_root=project_root)
-        baseline = self._read_report(check=check, path=paths.baseline_report)
+        if not self._has_baseline(check=check, path=paths.baseline_report):
+            return self._run_standalone(
+                check=check, project_root=project_root, paths=paths
+            )
+        baseline = self._read_report(
+            check=check, path=paths.baseline_report, report_type=PyArchGraphReport
+        )
         self._remove_report(check=check, path=paths.current_report)
         checking = check.model_copy(update={"args": paths.check_args})
         super().run(check=checking, project_root=project_root)
-        current = self._read_report(check=check, path=paths.current_report)
+        current = self._read_report(
+            check=check, path=paths.current_report, report_type=PyArchGraphReport
+        )
         if json.dumps(baseline.analysis.provenance, sort_keys=True) != json.dumps(
             current.analysis.provenance, sort_keys=True
         ):
@@ -143,6 +219,88 @@ class PyArchGraphCommand(Command):
             messages=messages,
         )
 
+    def _has_baseline(self, *, check: Check, path: Path) -> bool:
+        try:
+            # Inspect ancestors too: a dangling directory symlink is an error,
+            # not an absent baseline that can select standalone checking.
+            for candidate in (*reversed(path.parents), path):
+                try:
+                    metadata = candidate.lstat()
+                except FileNotFoundError:
+                    return False
+                if S_ISLNK(metadata.st_mode):
+                    candidate.stat()
+        except OSError as error:
+            raise CheckOutputError(
+                check_id=check.id,
+                command=self.name,
+                summary=f"Cannot inspect PyArchGraph baseline {path}",
+                problem=str(error),
+            ) from error
+        return True
+
+    def _run_standalone(
+        self, *, check: Check, project_root: Path, paths: PyArchGraphPaths
+    ) -> CheckResult:
+        self._remove_report(check=check, path=paths.current_report)
+        checking = check.model_copy(update={"args": paths.check_args})
+        try:
+            super().run(check=checking, project_root=project_root)
+        except _PyArchGraphIncompleteAnalysis:
+            current = self._read_report(
+                check=check,
+                path=paths.current_report,
+                report_type=PyArchGraphHealthReport,
+            )
+            if current.cleanup.coverage.complete:
+                raise
+        else:
+            current = self._read_report(
+                check=check,
+                path=paths.current_report,
+                report_type=PyArchGraphHealthReport,
+            )
+        cleanup = current.cleanup
+        metrics = current.quality.metrics
+        problems = cleanup.coverage.problems
+        failed = (
+            cleanup.violation_count > 0
+            or cleanup.possible_violation_count > 0
+            or bool(problems)
+        )
+        coverage = "incomplete; " + "; ".join(problems) if problems else "complete"
+        messages = (
+            "Standalone dependency health check; no baseline comparison was performed.",
+            (
+                f"Modules: {metrics.module_count}; "
+                f"dependencies: {metrics.dependency_count}; "
+                f"cyclic components: {metrics.cyclic_component_count}; "
+                f"cyclic modules: {metrics.cyclic_module_count}."
+            ),
+            (
+                f"cleanup.violation_count={cleanup.violation_count} "
+                f"(cyclic dependencies={cleanup.counts.cyclic_dependency}, "
+                f"forbidden dependencies={cleanup.counts.forbidden_dependency}); "
+                f"cleanup.possible_violation_count={cleanup.possible_violation_count}."
+            ),
+            f"Coverage: {coverage}.",
+            f"Current report: {paths.current_report}.",
+        )
+        if failed:
+            messages += (
+                (
+                    "Investigate cleanup.violations, cleanup.work_items, and "
+                    "cleanup.coverage in the current JSON report. Resolve all "
+                    "confirmed and possible violations and coverage issues, "
+                    "then rerun checksmith check."
+                ),
+            )
+        return CheckResult(
+            check_id=check.id,
+            status=CheckStatus.FAILED if failed else CheckStatus.PASSED,
+            messages=messages,
+        )
+
     def process_response(
         self,
         *,
@@ -153,7 +311,10 @@ class PyArchGraphCommand(Command):
         stderr: str,
     ) -> CheckResult:
         if exit_code != 0:
-            raise CheckOutputError(
+            error_type = (
+                _PyArchGraphIncompleteAnalysis if exit_code == 1 else CheckOutputError
+            )
+            raise error_type(
                 check_id=check_id,
                 command=self.name,
                 summary=f"pyarchgraph exited {exit_code} instead of completing analysis",
@@ -253,18 +414,19 @@ class PyArchGraphCommand(Command):
             problem=problem,
         )
 
-    def _read_report(self, *, check: Check, path: Path) -> PyArchGraphReport:
+    def _read_report[Report: PyArchGraphReport](
+        self, *, check: Check, path: Path, report_type: type[Report]
+    ) -> Report:
         try:
-            return PyArchGraphReport.model_validate_json(path.read_bytes())
+            return report_type.model_validate_json(path.read_bytes())
         except (OSError, ValidationError) as error:
             raise CheckOutputError(
                 check_id=check.id,
                 command=self.name,
                 summary=f"Cannot read PyArchGraph report {path}",
                 problem=(
-                    f"{error}\nA valid baseline must be generated with "
-                    "checksmith prepare before coding begins. Each run must "
-                    "write a fresh dependency-graph.json report."
+                    f"{error}\nExpected a valid schema 0.4 dependency-graph.json "
+                    "report. Each run must write a fresh report."
                 ),
             ) from error
 

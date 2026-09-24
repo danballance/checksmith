@@ -1,6 +1,7 @@
 import json
 import subprocess
 from collections.abc import Sequence
+from os import stat_result
 from pathlib import Path
 from typing import Final
 
@@ -11,7 +12,7 @@ from checksmith.commands.command import Command
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
 from checksmith.config import Argument, Check, ConfigPath
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
-from checksmith.errors import CheckOutputError
+from checksmith.errors import CheckExecutionError, CheckOutputError
 from tests.conftest import FakeProcesses
 
 ARGS: Final = (
@@ -56,6 +57,64 @@ def report_json(*, known: JsonValue, possible: JsonValue) -> str:
             },
         }
     )
+
+
+def standalone_report_json(
+    *,
+    known: int,
+    possible: int,
+    complete: bool,
+    scope_valid: bool,
+    dependency_resolution_complete: bool,
+    nonempty: bool,
+) -> str:
+    return json.dumps(
+        {
+            "schema_version": "0.4",
+            "analysis": {
+                "provenance": {
+                    "analyser": {"version": "0.4.0"},
+                    "source_root": "src",
+                    "graph_policy": {"include_tests": False},
+                },
+                "modules": ["app"],
+            },
+            "cleanup": {
+                "violation_count": known,
+                "possible_violation_count": possible,
+                "counts": {
+                    "cyclic_dependency": known // 2,
+                    "forbidden_dependency": known - known // 2,
+                },
+                "coverage": {
+                    "complete": complete,
+                    "scope_valid": scope_valid,
+                    "dependency_resolution_complete": dependency_resolution_complete,
+                    "nonempty": nonempty,
+                },
+                "violations": [{"evidence": {"path": "src/app.py", "line": 3}}],
+                "work_items": [{"id": "cycle:app"}],
+            },
+            "quality": {
+                "metrics": {
+                    "module_count": 8,
+                    "dependency_count": 11,
+                    "cyclic_component_count": 2,
+                    "cyclic_module_count": 4,
+                },
+            },
+        }
+    )
+
+
+HEALTHY_REPORT: Final = standalone_report_json(
+    known=0,
+    possible=0,
+    complete=True,
+    scope_valid=True,
+    dependency_resolution_complete=True,
+    nonempty=True,
+)
 
 
 def write_report(*, path: Path, content: str) -> None:
@@ -174,17 +233,103 @@ def test_module_additions_do_not_prevent_comparison(
     assert result.status is CheckStatus.PASSED
 
 
-def test_missing_baseline_fails_before_running_the_tool(
-    tmp_path: Path, processes: FakeProcesses
+@pytest.mark.parametrize(
+    (
+        "known", "possible", "complete", "scope_valid",
+        "dependency_resolution_complete", "nonempty", "status",
+    ),
+    [
+        (0, 0, True, True, True, True, CheckStatus.PASSED),
+        (1, 0, True, True, True, True, CheckStatus.FAILED),
+        (0, 1, True, True, True, True, CheckStatus.FAILED),
+        (3, 2, True, True, True, True, CheckStatus.FAILED),
+        (0, 0, False, True, True, True, CheckStatus.FAILED),
+        (0, 0, True, False, True, True, CheckStatus.FAILED),
+        (0, 0, True, True, False, True, CheckStatus.FAILED),
+        (0, 0, True, True, True, False, CheckStatus.FAILED),
+        (0, 0, False, False, False, False, CheckStatus.FAILED),
+    ],
+)
+def test_missing_baseline_runs_a_standalone_health_check(
+    known: int,
+    possible: int,
+    complete: bool,
+    scope_valid: bool,
+    dependency_resolution_complete: bool,
+    nonempty: bool,
+    status: CheckStatus,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with pytest.raises(CheckOutputError, match="checksmith prepare") as raised:
-        PyArchGraphCommand().run(
-            check=architecture_check(args=ARGS),
-            project_root=tmp_path,
-        )
+    baseline = tmp_path / "build/baseline/dependency-graph.json"
+    current = tmp_path / "build/current/dependency-graph.json"
+    content = standalone_report_json(
+        known=known,
+        possible=possible,
+        complete=complete,
+        scope_valid=scope_valid,
+        dependency_resolution_complete=dependency_resolution_complete,
+        nonempty=nonempty,
+    )
+    calls = stub_analysis(monkeypatch=monkeypatch, report_path=current, content=content)
+    check = architecture_check(args=ARGS)
 
-    assert str(tmp_path / "build/baseline/dependency-graph.json") in str(raised.value)
-    assert not processes.started
+    result = PyArchGraphCommand().run(check=check, project_root=tmp_path)
+
+    assert result.status is status
+    assert result.check_id == check.id
+    assert not baseline.exists()
+    assert current.read_text(encoding="utf-8") == content
+    assert len(calls) == 1
+    assert calls[0].args == (*ARGS[:-1], str(current.parent))
+    assert check.args == ARGS
+    summary = "\n".join(result.messages)
+    assert "no baseline comparison" in summary.lower()
+    assert f"cleanup.violation_count={known}" in summary
+    assert f"cleanup.possible_violation_count={possible}" in summary
+    assert str(current) in summary
+    coverage = {
+        "complete": complete,
+        "scope_valid": scope_valid,
+        "dependency_resolution_complete": dependency_resolution_complete,
+        "nonempty": nonempty,
+    }
+    if all(coverage.values()):
+        assert "Coverage: complete." in summary
+    else:
+        assert "Coverage: incomplete" in summary
+        for flag, value in coverage.items():
+            if not value:
+                assert f"{flag}=false" in summary
+
+
+def test_standalone_summary_includes_graph_metrics_and_violation_breakdown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "build/current/dependency-graph.json"
+    stub_analysis(
+        monkeypatch=monkeypatch,
+        report_path=current,
+        content=standalone_report_json(
+            known=5,
+            possible=2,
+            complete=True,
+            scope_valid=True,
+            dependency_resolution_complete=True,
+            nonempty=True,
+        ),
+    )
+
+    result = PyArchGraphCommand().run(
+        check=architecture_check(args=ARGS), project_root=tmp_path
+    )
+
+    summary = "\n".join(result.messages)
+    assert "Modules: 8; dependencies: 11; cyclic components: 2; cyclic modules: 4." in summary
+    assert "cleanup.violation_count=5" in summary
+    assert "cyclic dependencies=2, forbidden dependencies=3" in summary
+    assert "cleanup.possible_violation_count=2" in summary
+    assert f"Current report: {current}." in summary
 
 
 @pytest.mark.parametrize("stage", ["baseline", "current"])
@@ -535,7 +680,7 @@ def test_preparation_requires_a_successful_process_and_a_fresh_valid_report(
         assert not baseline.exists()
         with pytest.raises(CheckOutputError, match="Cannot read PyArchGraph report"):
             command.run(check=check, project_root=tmp_path)
-        assert len(processes.started) == 1
+        assert len(processes.started) == 2
     assert processes.started[0].argv == (
         "uvx",
         "--from",
@@ -545,3 +690,443 @@ def test_preparation_requires_a_successful_process_and_a_fresh_valid_report(
         str(baseline.parent),
     )
     assert processes.started[0].cwd == tmp_path
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "quality",
+        "metrics",
+        "module_count",
+        "dependency_count",
+        "cyclic_component_count",
+        "cyclic_module_count",
+        "counts",
+        "cyclic_dependency",
+        "forbidden_dependency",
+        "coverage",
+        "complete",
+        "scope_valid",
+        "dependency_resolution_complete",
+        "nonempty",
+    ],
+)
+def test_standalone_reports_require_every_consumed_health_field(
+    field: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stub_analysis(
+        monkeypatch=monkeypatch,
+        report_path=tmp_path / "build/current/dependency-graph.json",
+        content=HEALTHY_REPORT.replace(f'"{field}":', f'"missing_{field}":'),
+    )
+
+    with pytest.raises(CheckOutputError, match="Cannot read PyArchGraph report"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert not (tmp_path / "build/baseline/dependency-graph.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "valid"),
+    [
+        ("module_count", 8),
+        ("dependency_count", 11),
+        ("cyclic_component_count", 2),
+        ("cyclic_module_count", 4),
+        ("cyclic_dependency", 0),
+        ("forbidden_dependency", 0),
+    ],
+)
+@pytest.mark.parametrize("invalid", [True, -1, "1", 1.5, None])
+def test_standalone_metrics_and_breakdown_require_nonnegative_integers(
+    field: str,
+    valid: int,
+    invalid: JsonValue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_analysis(
+        monkeypatch=monkeypatch,
+        report_path=tmp_path / "build/current/dependency-graph.json",
+        content=HEALTHY_REPORT.replace(
+            f'"{field}": {valid}', f'"{field}": {json.dumps(invalid)}'
+        ),
+    )
+
+    with pytest.raises(CheckOutputError, match="Cannot read PyArchGraph report"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+
+@pytest.mark.parametrize(
+    "field", ["complete", "scope_valid", "dependency_resolution_complete", "nonempty"]
+)
+@pytest.mark.parametrize("invalid", [0, 1, "true", None])
+def test_standalone_coverage_requires_boolean_fields(
+    field: str,
+    invalid: JsonValue,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_analysis(
+        monkeypatch=monkeypatch,
+        report_path=tmp_path / "build/current/dependency-graph.json",
+        content=HEALTHY_REPORT.replace(
+            f'"{field}": true', f'"{field}": {json.dumps(invalid)}'
+        ),
+    )
+
+    with pytest.raises(CheckOutputError, match="Cannot read PyArchGraph report"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        "not JSON",
+        "[]",
+        "{}",
+        report_json(known=0, possible=0),
+        HEALTHY_REPORT.replace('"0.4"', '"0.3"'),
+    ],
+)
+def test_standalone_rejects_missing_malformed_and_unsupported_reports(
+    content: str | None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    current = tmp_path / "build/current/dependency-graph.json"
+    write_report(path=current, content=HEALTHY_REPORT)
+    calls = stub_analysis(monkeypatch=monkeypatch, report_path=current, content=content)
+
+    with pytest.raises(CheckOutputError, match="Cannot read PyArchGraph report"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert len(calls) == 1
+    assert not (tmp_path / "build/baseline/dependency-graph.json").exists()
+    if content is None:
+        assert not current.exists()
+
+
+@pytest.mark.parametrize(
+    "kind", ["malformed", "directory", "unreadable", "dangling", "dangling_parent"]
+)
+def test_an_invalid_existing_baseline_never_activates_standalone_analysis(
+    kind: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    baseline = tmp_path / "build/baseline/dependency-graph.json"
+    current = tmp_path / "build/current/dependency-graph.json"
+    write_report(path=current, content=HEALTHY_REPORT)
+    if kind != "dangling_parent":
+        baseline.parent.mkdir(parents=True)
+    if kind == "directory":
+        baseline.mkdir()
+    elif kind == "dangling":
+        baseline.symlink_to(tmp_path / "missing-report.json")
+    elif kind == "dangling_parent":
+        baseline.parent.symlink_to(tmp_path / "missing-directory", target_is_directory=True)
+    else:
+        baseline.write_text(
+            "{}" if kind == "malformed" else HEALTHY_REPORT, encoding="utf-8"
+        )
+    if kind == "unreadable":
+        original_read = Path.read_bytes
+
+        def read_bytes(self: Path) -> bytes:
+            if self == baseline:
+                raise PermissionError("Report is unreadable")
+            return original_read(self)
+
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+    with pytest.raises(CheckOutputError, match="PyArchGraph (report|baseline)") as error:
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert str(baseline) in str(error.value)
+    assert not processes.started
+    assert current.read_text(encoding="utf-8") == HEALTHY_REPORT
+
+
+def stub_process_analysis(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+    report_path: Path,
+    content: str | None,
+) -> None:
+    def run(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        stdin: int,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert not report_path.exists(), "Previous report must be removed before run"
+        if content is not None:
+            write_report(path=report_path, content=content)
+        return processes.run(
+            argv,
+            cwd=cwd,
+            stdin=stdin,
+            capture_output=capture_output,
+            text=text,
+            encoding=encoding,
+            check=check,
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+@pytest.mark.parametrize(
+    ("exit_code", "complete", "status"),
+    [
+        (0, True, CheckStatus.PASSED),
+        (0, False, CheckStatus.FAILED),
+        (1, False, CheckStatus.FAILED),
+    ],
+)
+def test_standalone_process_can_report_incomplete_analysis(
+    exit_code: int,
+    complete: bool,
+    status: CheckStatus,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    current = tmp_path / "build/current/dependency-graph.json"
+    content = standalone_report_json(
+        known=0,
+        possible=0,
+        complete=complete,
+        scope_valid=True,
+        dependency_resolution_complete=True,
+        nonempty=True,
+    )
+    write_report(path=current, content=HEALTHY_REPORT)
+    processes.exit_code = exit_code
+    processes.stdout = "Analysis summary"
+    processes.stderr = "Incomplete analysis" if not complete else ""
+    stub_process_analysis(
+        monkeypatch=monkeypatch,
+        processes=processes,
+        report_path=current,
+        content=content,
+    )
+
+    result = PyArchGraphCommand().run(
+        check=architecture_check(args=ARGS), project_root=tmp_path
+    )
+
+    assert result.status is status
+    assert current.read_text(encoding="utf-8") == content
+    assert not (tmp_path / "build/baseline/dependency-graph.json").exists()
+    assert len(processes.started) == 1
+    assert processes.started[0].argv[-2:] == ("--output-dir", str(current.parent))
+    assert processes.started[0].cwd == tmp_path
+    summary = "\n".join(result.messages)
+    assert "no baseline comparison" in summary.lower()
+    assert "Modules: 8" in summary
+    if not complete:
+        assert "Coverage: incomplete" in summary
+        assert "complete=false" in summary
+
+
+@pytest.mark.parametrize("exit_code", [2, 3, 4, -9])
+def test_standalone_operational_errors_cannot_be_reclassified_as_incomplete(
+    exit_code: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    current = tmp_path / "build/current/dependency-graph.json"
+    processes.exit_code = exit_code
+    processes.stdout = "Process details"
+    processes.stderr = "Operational failure"
+    stub_process_analysis(
+        monkeypatch=monkeypatch,
+        processes=processes,
+        report_path=current,
+        content=HEALTHY_REPORT.replace('"complete": true', '"complete": false'),
+    )
+
+    with pytest.raises(CheckOutputError, match=f"pyarchgraph exited {exit_code}") as error:
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert "Process details" in str(error.value)
+    assert "Operational failure" in str(error.value)
+
+
+@pytest.mark.parametrize("scope_valid", [True, False])
+def test_standalone_exit_one_requires_analysis_complete_to_be_false(
+    scope_valid: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    processes.exit_code = 1
+    stub_process_analysis(
+        monkeypatch=monkeypatch,
+        processes=processes,
+        report_path=tmp_path / "build/current/dependency-graph.json",
+        content=standalone_report_json(
+            known=0,
+            possible=0,
+            complete=True,
+            scope_valid=scope_valid,
+            dependency_resolution_complete=True,
+            nonempty=True,
+        ),
+    )
+
+    with pytest.raises(CheckOutputError, match="pyarchgraph exited 1"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+
+@pytest.mark.parametrize("content", [None, "not JSON", "{}"])
+def test_standalone_exit_one_still_requires_a_fresh_valid_report(
+    content: str | None,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    current = tmp_path / "build/current/dependency-graph.json"
+    write_report(path=current, content=HEALTHY_REPORT)
+    processes.exit_code = 1
+    stub_process_analysis(
+        monkeypatch=monkeypatch,
+        processes=processes,
+        report_path=current,
+        content=content,
+    )
+
+    with pytest.raises(CheckOutputError, match="Cannot read PyArchGraph report"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert not (tmp_path / "build/baseline/dependency-graph.json").exists()
+    if content is None:
+        assert not current.exists()
+
+
+def test_standalone_cannot_start_process_is_an_execution_error(
+    tmp_path: Path, processes: FakeProcesses
+) -> None:
+    processes.refusal = OSError("Unable to launch PyArchGraph")
+
+    with pytest.raises(CheckExecutionError, match="Unable to launch PyArchGraph"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert not processes.started
+
+
+def test_shared_adapter_switches_between_prepared_and_standalone_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = PyArchGraphCommand()
+    check = architecture_check(args=ARGS)
+    baseline = tmp_path / "build/baseline/dependency-graph.json"
+    current = tmp_path / "build/current/dependency-graph.json"
+    original = report_json(known=3, possible=2)
+    write_report(path=baseline, content=original)
+    stub_analysis(monkeypatch=monkeypatch, report_path=current, content=original)
+
+    prepared_result = command.run(check=check, project_root=tmp_path)
+
+    assert prepared_result.status is CheckStatus.PASSED
+    assert "baseline=3" in prepared_result.messages[0]
+    assert baseline.read_text(encoding="utf-8") == original
+    baseline.unlink()
+    stub_analysis(
+        monkeypatch=monkeypatch, report_path=current, content=HEALTHY_REPORT
+    )
+
+    standalone_result = command.run(check=check, project_root=tmp_path)
+
+    assert standalone_result.status is CheckStatus.PASSED
+    assert "no baseline comparison" in "\n".join(standalone_result.messages).lower()
+    assert not baseline.exists()
+    write_report(path=baseline, content=original)
+    stub_analysis(
+        monkeypatch=monkeypatch,
+        report_path=current,
+        content=report_json(known=4, possible=2),
+    )
+
+    regression_result = command.run(check=check, project_root=tmp_path)
+
+    assert regression_result.status is CheckStatus.FAILED
+    assert "baseline=3, current=4" in regression_result.messages[0]
+    assert baseline.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize("inspect_parent", [True, False])
+def test_baseline_inspection_errors_cannot_activate_standalone_analysis(
+    inspect_parent: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    baseline = tmp_path / "build/baseline/dependency-graph.json"
+    write_report(path=baseline, content=HEALTHY_REPORT)
+    inaccessible = baseline.parent if inspect_parent else baseline
+    original_lstat = Path.lstat
+
+    def lstat(self: Path) -> stat_result:
+        if self == inaccessible:
+            raise PermissionError("Cannot inspect this path")
+        return original_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+
+    with pytest.raises(CheckOutputError, match="Cannot inspect PyArchGraph baseline"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert not processes.started
+    assert baseline.read_text(encoding="utf-8") == HEALTHY_REPORT
+
+
+def test_prepared_comparison_does_not_accept_incomplete_analysis_exit_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+) -> None:
+    baseline = tmp_path / "build/baseline/dependency-graph.json"
+    write_report(path=baseline, content=HEALTHY_REPORT)
+    processes.exit_code = 1
+    stub_process_analysis(
+        monkeypatch=monkeypatch,
+        processes=processes,
+        report_path=tmp_path / "build/current/dependency-graph.json",
+        content=HEALTHY_REPORT.replace('"complete": true', '"complete": false'),
+    )
+
+    with pytest.raises(CheckOutputError, match="pyarchgraph exited 1"):
+        PyArchGraphCommand().run(
+            check=architecture_check(args=ARGS), project_root=tmp_path
+        )
+
+    assert baseline.read_text(encoding="utf-8") == HEALTHY_REPORT
+    assert len(processes.started) == 1

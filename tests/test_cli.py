@@ -1,7 +1,8 @@
 """Tests for :mod:`checksmith.cli`."""
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+import subprocess
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from checksmith.dtos import (
 from checksmith.errors import CheckOutputError, ConfigSyntaxError
 from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
+from tests.commands.test_pyarchgraph import standalone_report_json, write_report
 from tests.conftest import FakeProcesses
 
 
@@ -304,6 +306,198 @@ def test_cli_reports_semgrep_scan_failures_as_errors(
     assert "ERROR" in result.stdout
     assert "Check 'function-style':" in result.stdout
     assert "Could not load semgrep.yaml" in result.stdout
+
+
+@pytest.fixture
+def pyarchgraph_config_file(tmp_path: Path) -> Path:
+    path = tmp_path / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: .\n"
+        "checks:\n"
+        "  - id: architecture\n"
+        "    package_type: uvx\n"
+        "    package: pyarchgraph==0.4.0\n"
+        "    command: pyarchgraph\n"
+        "    args: [src, --project-root, ., --output, json, --output-dir, build]\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def stub_pyarchgraph_process(
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
+    content: str | None,
+) -> None:
+    def run(
+        argv: Sequence[str],
+        *,
+        cwd: str,
+        stdin: int,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        output_dir = Path(argv[argv.index("--output-dir") + 1])
+        if content is not None:
+            write_report(path=output_dir / "dependency-graph.json", content=content)
+        return processes.run(
+            argv,
+            cwd=cwd,
+            stdin=stdin,
+            capture_output=capture_output,
+            text=text,
+            encoding=encoding,
+            check=check,
+        )
+
+    monkeypatch.setattr(subprocess, "run", run)
+
+
+@pytest.mark.parametrize("output_format", ["text", "json"])
+@pytest.mark.parametrize(
+    ("known", "possible", "complete", "tool_exit_code", "exit_code", "status"),
+    [
+        (0, 0, True, 0, ExitCode.SUCCESS, CheckStatus.PASSED),
+        (2, 0, True, 0, ExitCode.UNHEALTHY, CheckStatus.FAILED),
+        (0, 1, True, 0, ExitCode.UNHEALTHY, CheckStatus.FAILED),
+        (0, 0, False, 0, ExitCode.UNHEALTHY, CheckStatus.FAILED),
+        (0, 0, False, 1, ExitCode.UNHEALTHY, CheckStatus.FAILED),
+    ],
+)
+def test_cli_reports_standalone_pyarchgraph_health(
+    cli_runner: CliRunner,
+    pyarchgraph_config_file: Path,
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+    known: int,
+    possible: int,
+    complete: bool,
+    tool_exit_code: int,
+    exit_code: ExitCode,
+    status: CheckStatus,
+) -> None:
+    content = standalone_report_json(
+        known=known,
+        possible=possible,
+        complete=complete,
+        scope_valid=True,
+        dependency_resolution_complete=True,
+        nonempty=True,
+    )
+    processes.exit_code = tool_exit_code
+    stub_pyarchgraph_process(
+        monkeypatch=monkeypatch, processes=processes, content=content
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "check",
+            "--config",
+            str(pyarchgraph_config_file),
+            "--format",
+            output_format,
+        ],
+    )
+
+    assert result.exit_code == exit_code, result.stdout
+    assert result.stderr == ""
+    root = pyarchgraph_config_file.parent
+    current = root / "build/current/dependency-graph.json"
+    assert current.read_text(encoding="utf-8") == content
+    assert not (root / "build/baseline/dependency-graph.json").exists()
+    assert processes.started[0].cwd == root
+    assert processes.started[0].argv == (
+        "uvx",
+        "--from",
+        "pyarchgraph==0.4.0",
+        "pyarchgraph",
+        "src",
+        "--project-root",
+        ".",
+        "--output",
+        "json",
+        "--output-dir",
+        str(current.parent),
+    )
+    if output_format == "json":
+        payload = json.loads(result.stdout)
+        assert set(payload) == {"results"}
+        assert len(payload["results"]) == 1
+        assert set(payload["results"][0]) == {"check_id", "status", "messages"}
+        output = CheckOutput.model_validate_json(result.stdout)
+        assert output.results[0].check_id == "architecture"
+        assert output.results[0].status is status
+        messages = "\n".join(output.results[0].messages)
+        assert "baseline" in messages.lower()
+        assert "standalone" in messages.lower()
+        assert str(current) in messages
+        assert "coverage" in messages.lower()
+    else:
+        assert "architecture" in result.stdout
+        assert ("PASS" if status is CheckStatus.PASSED else "FAIL") in result.stdout
+        assert "baseline" in result.stdout.lower()
+
+
+@pytest.mark.parametrize("output_format", ["text", "json"])
+@pytest.mark.parametrize(
+    ("content", "tool_exit_code", "stderr", "message"),
+    [
+        ("not json", 0, "", "Cannot read PyArchGraph report"),
+        (None, 2, "Cannot analyze src", "pyarchgraph exited 2"),
+    ],
+)
+def test_cli_reports_standalone_pyarchgraph_errors(
+    cli_runner: CliRunner,
+    pyarchgraph_config_file: Path,
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+    output_format: str,
+    content: str | None,
+    tool_exit_code: int,
+    stderr: str,
+    message: str,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stderr = stderr
+    stub_pyarchgraph_process(
+        monkeypatch=monkeypatch, processes=processes, content=content
+    )
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "check",
+            "--config",
+            str(pyarchgraph_config_file),
+            "--format",
+            output_format,
+        ],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert not (
+        pyarchgraph_config_file.parent / "build/baseline/dependency-graph.json"
+    ).exists()
+    if output_format == "json":
+        output = CheckOutput.model_validate_json(result.stdout)
+        assert len(output.results) == 1
+        assert output.results[0].check_id == "architecture"
+        assert output.results[0].status is CheckStatus.ERROR
+        messages = "\n".join(output.results[0].messages)
+        assert message in messages
+        if stderr:
+            assert stderr in messages
+    else:
+        assert "architecture" in result.stdout
+        assert "ERROR" in result.stdout
+        assert "PyArchGraph" in result.stdout or "pyarchgraph" in result.stdout
 
 
 @pytest.fixture
