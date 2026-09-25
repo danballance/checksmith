@@ -7,6 +7,7 @@ import pytest
 from checksmith.commands.command import Command
 from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
+from checksmith.commands.pytest import PytestCommand
 from checksmith.commands.registry import CommandFactory
 from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
@@ -23,6 +24,7 @@ def test_importing_the_registry_loads_each_command_implementation(
         "checksmith.commands.command",
         "checksmith.commands.import_linter",
         "checksmith.commands.pyarchgraph",
+        "checksmith.commands.pytest",
         "checksmith.commands.registry",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
@@ -38,6 +40,7 @@ def test_importing_the_registry_loads_each_command_implementation(
         (CommandName.IMPORT_LINTER, ImportLinterCommand),
         (CommandName.TY, TyCommand),
         (CommandName.PYARCHGRAPH, PyArchGraphCommand),
+        (CommandName.PYTEST, PytestCommand),
     ],
 )
 def test_the_configured_command_selects_the_class_that_handles_it(

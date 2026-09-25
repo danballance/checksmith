@@ -1,0 +1,16 @@
+[tool.coverage.run]
+branch = false
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/*_test.py",
+    "*/conftest.py",
+    "*/.venv/*",
+    "*/venv/*",
+    "*/build/*",
+    "*/dist/*",
+]
+
+[tool.coverage.report]
+include_namespace_packages = true
+precision = 2

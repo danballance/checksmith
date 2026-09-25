@@ -1,7 +1,59 @@
 import pytest
 
 from checksmith.dtos import PackageType
-from checksmith.packages import NpxPackage, UvxPackage
+from checksmith.packages import NpxPackage, Package, UvPackage, UvxPackage
+
+
+@pytest.mark.parametrize(
+    ("name", "package_class"),
+    [("uv", UvPackage), (PackageType.UV, UvPackage)],
+)
+def test_the_uv_project_mode_resolves_from_its_name(
+    name: str | PackageType,
+    package_class: type[Package],
+) -> None:
+    package = Package.from_name(name)
+
+    assert isinstance(package, package_class)
+    assert package.name is PackageType.UV
+
+
+def test_uv_accepts_an_explicit_null_package() -> None:
+    UvPackage().validate_package(package=None)
+
+
+@pytest.mark.parametrize("package", ["pytest", "pytest==9.0.2", ""])
+def test_uv_rejects_a_package_override(package: str) -> None:
+    with pytest.raises(ValueError, match="uv package must be null"):
+        UvPackage().validate_package(package=package)
+
+
+def test_uv_runs_the_project_command_with_a_locked_environment() -> None:
+    argv = UvPackage().build_argv(
+        package=None,
+        command="pytest",
+        arguments=("tests", "--maxfail=1"),
+    )
+
+    assert argv == ("uv", "run", "--locked", "pytest", "tests", "--maxfail=1")
+
+
+def test_uv_refuses_a_package_override_when_building_the_vector() -> None:
+    with pytest.raises(ValueError, match="uv package must be null"):
+        UvPackage().build_argv(
+            package="pytest==9.0.2",
+            command="pytest",
+            arguments=("tests",),
+        )
+
+
+@pytest.mark.parametrize("package", [NpxPackage(), UvxPackage()])
+def test_isolated_packages_require_a_package_name(package: Package) -> None:
+    with pytest.raises(ValueError, match="must name a versioned package"):
+        package.validate_package(package=None)
+
+    with pytest.raises(ValueError, match="must name a versioned package"):
+        package.build_argv(package=None, command="tool", arguments=())
 
 
 @pytest.fixture

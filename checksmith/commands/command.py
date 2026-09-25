@@ -1,13 +1,21 @@
 """One command: how it is run, and how the program's own output is read."""
 
 import logging
+import os
 import subprocess
+import tomllib
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from pathlib import Path
+from stat import S_ISREG
 
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CheckStatus, CommandName
-from checksmith.errors import CheckExecutionError, CheckOutputError
+from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
+from checksmith.errors import (
+    CheckExecutionError,
+    CheckOutputError,
+    CheckPrerequisiteError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,10 +61,21 @@ class Command(ABC):
         tool that stops to ask a question should fail, not hang a gate that
         nobody is watching.
         """
-        logger.debug("%s argv=%s cwd=%s", check.id, check.argv, project_root)
+        return self._run_argv(check=check, project_root=project_root, argv=check.argv)
+
+    def _run_argv(
+        self,
+        *,
+        check: Check,
+        project_root: Path,
+        argv: tuple[str, ...],
+    ) -> CheckResult:
+        if check.package_type is PackageType.UV:
+            self._require_uv_project(check=check, project_root=project_root)
+        logger.debug("%s argv=%s cwd=%s", check.id, argv, project_root)
         try:
             completed = subprocess.run(
-                check.argv,
+                argv,
                 # Stringified here rather than left to the standard library:
                 # when the root is the thing that is missing, the operating
                 # system quotes what it was handed, and a ``PosixPath(...)``
@@ -79,7 +98,7 @@ class Command(ABC):
             # and the check's id is the only thing that says which one.
             raise CheckExecutionError(
                 check_id=check.id,
-                program=check.argv[0],
+                program=argv[0],
                 working_directory=project_root,
                 problem=str(error),
             ) from error
@@ -104,6 +123,58 @@ class Command(ABC):
             stdout=completed.stdout,
             stderr=completed.stderr,
         )
+
+    def _require_uv_project(self, *, check: Check, project_root: Path) -> None:
+        for variable in ("UV_PROJECT", "UV_WORKING_DIR"):
+            if os.environ.get(variable):
+                raise CheckPrerequisiteError(
+                    check_id=check.id,
+                    command=self.name,
+                    config_file=project_root / "pyproject.toml",
+                    problem=(
+                        f"Unset {variable}; Checksmith uses project_root "
+                        "to select the uv project and working directory"
+                    ),
+                )
+        no_sync = os.environ.get("UV_NO_SYNC")
+        if no_sync is not None and no_sync.lower() not in {"0", "false", "no", "off"}:
+            raise CheckPrerequisiteError(
+                check_id=check.id,
+                command=self.name,
+                config_file=project_root / "pyproject.toml",
+                problem="UV_NO_SYNC must be unset or false for locked uv execution",
+            )
+        for filename in ("pyproject.toml", "uv.lock"):
+            config_file = project_root / filename
+            try:
+                if not S_ISREG(config_file.stat().st_mode):
+                    raise OSError(f"Expected a regular file: {config_file}")
+                with config_file.open("rb") as stream:
+                    if filename == "pyproject.toml":
+                        try:
+                            document: Mapping[str, object] = tomllib.load(stream)
+                        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
+                            raise ValueError(
+                                f"invalid pyproject.toml: {error}"
+                            ) from error
+                        tool = document.get("tool")
+                        uv = tool.get("uv") if isinstance(tool, Mapping) else None
+                        if isinstance(uv, Mapping) and uv.get("managed") is False:
+                            raise ValueError(
+                                "uv execution requires tool.uv.managed=true"
+                            )
+                    else:
+                        stream.read(1)
+            except (OSError, ValueError) as error:
+                raise CheckPrerequisiteError(
+                    check_id=check.id,
+                    command=self.name,
+                    config_file=config_file,
+                    problem=(
+                        "uv execution requires readable pyproject.toml and uv.lock "
+                        f"files in the project root: {error}"
+                    ),
+                ) from error
 
     @abstractmethod
     def process_response(

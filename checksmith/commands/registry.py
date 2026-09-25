@@ -3,6 +3,7 @@ from collections.abc import Mapping
 from checksmith.commands.command import Command
 from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
+from checksmith.commands.pytest import PytestCommand
 from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
 from checksmith.commands.ty import TyCommand
@@ -30,6 +31,8 @@ class CommandFactory:
                 return TyCommand()
             case CommandName.PYARCHGRAPH:
                 return PyArchGraphCommand()
+            case CommandName.PYTEST:
+                return PytestCommand()
 
     @classmethod
     def registry(cls) -> Mapping[CommandName, Command]:

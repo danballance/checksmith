@@ -46,6 +46,7 @@ def test_cli_imports_the_command_factory_and_implementations(
         "checksmith.commands.command",
         "checksmith.commands.import_linter",
         "checksmith.commands.pyarchgraph",
+        "checksmith.commands.pytest",
         "checksmith.commands.ruff",
         "checksmith.commands.semgrep",
         "checksmith.commands.ty",
@@ -189,6 +190,174 @@ def test_a_tool_that_cannot_scan_is_reported_as_an_error_row(
     assert "ERROR" in result.stdout
     assert "Check 'ruff': ruff exited 2" in result.stdout
     assert "unknown field `nonsense_key`" in result.stdout
+
+
+@pytest.fixture
+def pytest_config_file(tmp_path: Path) -> Path:
+    directory = tmp_path / ".checksmith"
+    directory.mkdir()
+    path = directory / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: ..\n"
+        "checks:\n"
+        "  - id: unit-tests\n"
+        "    package_type: uv\n"
+        "    package: null\n"
+        "    command: pytest\n"
+        "    args: [tests]\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.fixture
+def pytest_project_root(pytest_config_file: Path) -> Path:
+    root = pytest_config_file.parent.parent
+    (root / "pyproject.toml").write_text(
+        '[project]\nname = "sample"\nversion = "0.1.0"\n',
+        encoding="utf-8",
+    )
+    (root / "uv.lock").write_text("version = 1\n", encoding="utf-8")
+    return root
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+@pytest.mark.parametrize(
+    ("tool_exit_code", "stdout", "expected_status", "expected_exit_code"),
+    [
+        (10, "1 passed in 0.01s\n", CheckStatus.PASSED, ExitCode.SUCCESS),
+        (
+            11,
+            "FAILED tests/test_app.py::test_app - AssertionError\n",
+            CheckStatus.FAILED,
+            ExitCode.UNHEALTHY,
+        ),
+        (15, "no tests ran in 0.01s\n", CheckStatus.PASSED, ExitCode.SUCCESS),
+        (
+            16,
+            "Maximum allowed warnings exceeded\n",
+            CheckStatus.FAILED,
+            ExitCode.UNHEALTHY,
+        ),
+        (1, "Failed to synchronize the environment\n", CheckStatus.ERROR,
+         ExitCode.ERROR),
+        (12, "ImportError while collecting tests\n", CheckStatus.ERROR,
+         ExitCode.ERROR),
+    ],
+)
+def test_cli_reports_project_pytest_results_and_native_diagnostics(
+    cli_runner: CliRunner,
+    pytest_config_file: Path,
+    pytest_project_root: Path,
+    processes: FakeProcesses,
+    fmt: OutputFormat,
+    tool_exit_code: int,
+    stdout: str,
+    expected_status: CheckStatus,
+    expected_exit_code: ExitCode,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = stdout
+    processes.stderr = "Additional pytest diagnostic\n"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(pytest_config_file), "--format", fmt.value],
+    )
+
+    assert result.exit_code == expected_exit_code
+    assert result.stderr == ""
+    assert len(processes.started) == 1
+    assert processes.started[0].cwd == pytest_project_root
+    assert processes.started[0].argv[:5] == (
+        "uv", "run", "--locked", "python", "-c"
+    )
+    assert processes.started[0].argv[-1] == "tests"
+    if fmt is OutputFormat.JSON:
+        results = json.loads(result.stdout)["results"]
+        assert len(results) == 1
+        assert results[0]["check_id"] == "unit-tests"
+        assert results[0]["status"] == expected_status.value
+        output = "\n".join(results[0]["messages"])
+    else:
+        label = {
+            CheckStatus.PASSED: "PASS",
+            CheckStatus.FAILED: "FAIL",
+            CheckStatus.ERROR: "ERROR",
+        }[expected_status]
+        assert label in result.stdout
+        assert "unit-tests" in result.stdout
+        output = result.stdout
+    assert stdout.strip() in output
+    assert processes.stderr.strip() in output
+
+
+def test_cli_runs_pytest_from_the_configured_root_when_invoked_elsewhere(
+    cli_runner: CliRunner,
+    pytest_config_file: Path,
+    pytest_project_root: Path,
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    elsewhere = pytest_project_root / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    processes.exit_code = 10
+
+    result = cli_runner.invoke(app, ["check", "--config", str(pytest_config_file)])
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert processes.started[0].cwd == pytest_project_root
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+def test_cli_reports_a_missing_uv_project_as_an_error_even_without_tests(
+    cli_runner: CliRunner,
+    pytest_config_file: Path,
+    processes: FakeProcesses,
+    fmt: OutputFormat,
+) -> None:
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(pytest_config_file), "--format", fmt.value],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert processes.started == []
+    if fmt is OutputFormat.JSON:
+        results = json.loads(result.stdout)["results"]
+        assert results[0]["status"] == "error"
+        assert "pyproject.toml" in "\n".join(results[0]["messages"])
+    else:
+        assert "ERROR" in result.stdout
+        assert "pyproject.toml" in result.stdout
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+def test_prepare_skips_pytest_without_loading_its_project_prerequisites(
+    cli_runner: CliRunner,
+    pytest_config_file: Path,
+    processes: FakeProcesses,
+    fmt: OutputFormat,
+) -> None:
+    result = cli_runner.invoke(
+        app,
+        ["prepare", "--config", str(pytest_config_file), "--format", fmt.value],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started == []
+    if fmt is OutputFormat.JSON:
+        results = json.loads(result.stdout)["results"]
+        assert results[0]["check_id"] == "unit-tests"
+        assert results[0]["status"] == "skipped"
+        assert results[0]["messages"]
+    else:
+        assert "unit-tests" in result.stdout
+        assert "SKIP" in result.stdout
 
 
 @pytest.fixture

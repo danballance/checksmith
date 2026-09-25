@@ -255,7 +255,7 @@ def test_two_checks_may_share_an_id() -> None:
     assert tuple(item.id for item in parse(body).checks) == ("ruff", "ruff")
 
 
-@pytest.mark.parametrize("package_type", ["uv", "pipx", "", 1, None])
+@pytest.mark.parametrize("package_type", ["pipx", "", 1, None])
 def test_an_unsupported_package_type_is_rejected(package_type: Any) -> None:
     body = document(checks=[check(package_type=package_type)])
 
@@ -340,6 +340,52 @@ def test_a_package_is_checked_against_the_package_type_that_will_consume_it() ->
     npm = document(checks=[check(package_type="npx", package="prettier@3.6.2")])
 
     assert parse(npm).checks[0].package == "prettier@3.6.2"
+
+
+def test_a_uv_check_requires_an_explicit_null_package() -> None:
+    body = document(checks=[check(package_type="uv", package=...)])
+
+    assert fields_of(reject(body)) == ("checks.0.package",)
+
+
+@pytest.mark.parametrize("package", ["pytest", "pytest==9.0.2", ""])
+def test_a_uv_check_rejects_a_package_specification(package: str) -> None:
+    body = document(checks=[check(package_type="uv", package=package)])
+
+    assert fields_of(reject(body)) == ("checks.0.package",)
+
+
+@pytest.mark.parametrize("package_type", ["uvx", "npx"])
+def test_an_isolated_check_rejects_a_null_package(package_type: str) -> None:
+    body = document(checks=[check(package_type=package_type, package=None)])
+
+    assert fields_of(reject(body)) == ("checks.0.package",)
+
+
+@pytest.mark.parametrize(
+    ("package_type", "package"),
+    [("uvx", "pytest==9.0.2"), ("npx", "pytest@9.0.2")],
+)
+def test_pytest_requires_the_uv_project_environment(
+    package_type: str,
+    package: str,
+) -> None:
+    body = document(
+        checks=[check(package_type=package_type, package=package, command="pytest")]
+    )
+
+    error = reject(body)
+
+    assert fields_of(error) == ("checks.0.command",)
+    assert "pytest requires package_type: uv" in str(error)
+
+
+def test_an_invalid_pytest_package_type_reports_only_the_type() -> None:
+    body = document(
+        checks=[check(package_type="pipx", package=None, command="pytest")]
+    )
+
+    assert fields_of(reject(body)) == ("checks.0.package_type",)
 
 
 def test_an_unusable_package_type_suppresses_the_package_complaint() -> None:
@@ -565,6 +611,23 @@ def test_a_config_path_reaches_the_vector_as_a_plain_string() -> None:
     assert all(isinstance(item, str) for item in check_.argv)
 
 
+def test_resolved_arguments_can_be_used_without_the_package_runner() -> None:
+    check_ = parse(
+        document(
+            checks=[
+                check(args=["--config", {"config_path": "ruff.toml"}, "a path"])
+            ]
+        )
+    ).checks[0]
+
+    assert check_.arguments == (
+        "--config",
+        "/project/.checksmith/ruff.toml",
+        "a path",
+    )
+    assert "arguments" not in Check.model_fields
+
+
 def test_bare_arguments_beside_a_config_path_are_still_passed_through() -> None:
     """The two forms coexist: only the marked one is resolved.
 
@@ -624,6 +687,27 @@ def test_a_uvx_check_builds_the_documented_vector() -> None:
         "./ruff.toml",
         ".",
     )
+
+
+def test_a_pytest_check_builds_a_locked_project_vector() -> None:
+    configured = resolved(
+        id="tests",
+        package_type="uv",
+        package=None,
+        command="pytest",
+        args=["tests"],
+    )
+
+    assert configured.command is CommandName.PYTEST
+    assert configured.package_type is PackageType.UV
+    assert configured.package is None
+    assert configured.argv == ("uv", "run", "--locked", "pytest", "tests")
+
+
+def test_other_commands_can_use_the_uv_project_environment() -> None:
+    configured = resolved(package_type="uv", package=None, args=["check", "."])
+
+    assert configured.argv == ("uv", "run", "--locked", "ruff", "check", ".")
 
 
 def test_a_semgrep_check_is_accepted_and_builds_a_uvx_vector() -> None:

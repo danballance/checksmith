@@ -24,14 +24,14 @@ class Package(ABC):
         pass
 
     @abstractmethod
-    def validate_package(self, *, package: str) -> None:
+    def validate_package(self, *, package: str | None) -> None:
         pass
 
     @abstractmethod
     def build_argv(
         self,
         *,
-        package: str,
+        package: str | None,
         command: str,
         arguments: tuple[str, ...],
     ) -> tuple[str, ...]:
@@ -50,10 +50,14 @@ class Package(ABC):
                 return UvxPackage()
             case PackageType.NPX.value:
                 return NpxPackage()
+            case PackageType.UV.value:
+                return UvPackage()
             case PackageType.UVX:
                 return UvxPackage()
             case PackageType.NPX:
                 return NpxPackage()
+            case PackageType.UV:
+                return UvPackage()
             case _:
                 raise ValueError("Name not recognised:", name)
 
@@ -68,7 +72,7 @@ class NpxPackage(Package):
     def name(self) -> PackageType:
         return PackageType.NPX
 
-    def validate_package(self, *, package: str) -> None:
+    def validate_package(self, *, package: str | None) -> None:
         """Reject anything that is not a name at a constrained range.
 
         The name half is npm's to judge, not Checksmith's: duplicating that
@@ -82,6 +86,8 @@ class NpxPackage(Package):
         ``@scope/name`` with no range: the scope marker becomes the separator
         and the complaint lands on the range half. It is still rejected.
         """
+        if package is None:
+            raise ValueError("npx package must name a versioned package, got null")
         _, separator, version_range = package.rpartition("@")
         if separator == "":
             raise ValueError(
@@ -109,10 +115,12 @@ class NpxPackage(Package):
     def build_argv(
         self,
         *,
-        package: str,
+        package: str | None,
         command: str,
         arguments: tuple[str, ...],
     ) -> tuple[str, ...]:
+        if package is None:
+            raise ValueError("npx package must name a versioned package, got null")
         argv = ("npx", "--yes", "--package", package, command, *arguments)
         logger.debug("npx built %s", argv)
         return argv
@@ -125,7 +133,7 @@ class UvxPackage(Package):
     def name(self) -> PackageType:
         return PackageType.UVX
 
-    def validate_package(self, *, package: str) -> None:
+    def validate_package(self, *, package: str | None) -> None:
         """Require a version constraint or a Git HTTPS URL pinned to a commit.
 
         ``packaging`` owns the grammar, so extras and markers are accepted for
@@ -133,6 +141,8 @@ class UvxPackage(Package):
         must identify a repository and a full commit, without query or fragment
         options; branches and tags may change between runs.
         """
+        if package is None:
+            raise ValueError("uvx package must name a versioned package, got null")
         try:
             requirement = Requirement(package)
         except InvalidRequirement as error:
@@ -177,10 +187,36 @@ class UvxPackage(Package):
     def build_argv(
         self,
         *,
-        package: str,
+        package: str | None,
         command: str,
         arguments: tuple[str, ...],
     ) -> tuple[str, ...]:
+        if package is None:
+            raise ValueError("uvx package must name a versioned package, got null")
         argv = ("uvx", "--from", package, command, *arguments)
         logger.debug("uvx built %s", argv)
+        return argv
+
+
+class UvPackage(Package):
+    """A Python command owned by the application's locked uv project."""
+
+    @property
+    def name(self) -> PackageType:
+        return PackageType.UV
+
+    def validate_package(self, *, package: str | None) -> None:
+        if package is not None:
+            raise ValueError("uv package must be null; the project owns its dependencies")
+
+    def build_argv(
+        self,
+        *,
+        package: str | None,
+        command: str,
+        arguments: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        self.validate_package(package=package)
+        argv = ("uv", "run", "--locked", command, *arguments)
+        logger.debug("uv built %s", argv)
         return argv

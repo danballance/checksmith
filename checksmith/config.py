@@ -74,13 +74,17 @@ class Check(BaseModel):
 
     id: str = Field(min_length=1)
     package_type: PackageType
-    package: str = Field(min_length=1)
+    package: str | None = Field(min_length=1)
     command: CommandName
     args: tuple[Argument, ...]
 
     @field_validator("package")
     @classmethod
-    def _package_names_a_version(cls, value: str, info: ValidationInfo) -> str:
+    def _package_matches_its_type(
+        cls,
+        value: str | None,
+        info: ValidationInfo,
+    ) -> str | None:
         # A field validator, not a model validator, so the complaint lands on
         # ``package`` --- the line a user has to edit.
         package_type = info.data.get("package_type")
@@ -91,9 +95,33 @@ class Check(BaseModel):
         Package.from_name(name=package_type).validate_package(package=value)
         return value
 
+    @field_validator("command")
+    @classmethod
+    def _pytest_uses_the_project_environment(
+        cls,
+        value: CommandName,
+        info: ValidationInfo,
+    ) -> CommandName:
+        package_type = info.data.get("package_type")
+        if (
+            value is CommandName.PYTEST
+            and package_type is not None
+            and package_type is not PackageType.UV
+        ):
+            raise ValueError("pytest requires package_type: uv")
+        return value
+
+    @property
+    def arguments(self) -> tuple[str, ...]:
+        """Arguments with config-relative paths resolved into strings."""
+        return tuple(
+            argument if isinstance(argument, str) else str(argument.config_path)
+            for argument in self.args
+        )
+
     @property
     def argv(self) -> tuple[str, ...]:
-        """The vector this check runs, with ``uvx`` or ``npx`` at position zero.
+        """The vector this check runs, beginning with its package runner.
 
         An argument *vector*, never a command string: nothing here is ever
         handed to a shell, so a path containing a space or a quote needs no
@@ -103,14 +131,10 @@ class Check(BaseModel):
         it here is only stringification: by this point every argument is
         something the tool can be handed as it stands.
         """
-        arguments = tuple(
-            argument if isinstance(argument, str) else str(argument.config_path)
-            for argument in self.args
-        )
         return Package.from_name(name=self.package_type).build_argv(
             package=self.package,
             command=self.command.value,
-            arguments=arguments,
+            arguments=self.arguments,
         )
 
 

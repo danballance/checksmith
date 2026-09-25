@@ -13,6 +13,8 @@ checksmith-config-pack/
 
 dist/
 
+/build/pyarchgraph/
+
 artifacts/comprehension-review/
 
 .DS_Store

@@ -51,6 +51,9 @@ class PackageType(StrEnum):
     NPX = "npx"
     """An npm package, run through ``npx``."""
 
+    UV = "uv"
+    """A project-owned Python command, run through ``uv run --locked``."""
+
 
 class CommandName(StrEnum):
     """Which command a check configures, and so which reads its output."""
@@ -65,3 +68,5 @@ class CommandName(StrEnum):
     TY = "ty"
 
     PYARCHGRAPH = "pyarchgraph"
+
+    PYTEST = "pytest"

@@ -13,8 +13,10 @@ from pathlib import Path
 import pytest
 import yaml
 
+from checksmith.commands.pyarchgraph import PyArchGraphCommand
 from checksmith.config import Config, ConfigPath
-from checksmith.dtos import CommandName, PackageType
+from checksmith.dtos import CheckStatus, CommandName, PackageType
+from tests.commands.test_pyarchgraph import HEALTHY_REPORT, report_json, stub_analysis
 
 
 @pytest.fixture
@@ -25,7 +27,7 @@ def default_assets() -> Iterator[Path]:
         yield path
 
 
-def test_the_starter_directory_ships_three_files(default_assets: Path) -> None:
+def test_the_starter_directory_ships_four_files(default_assets: Path) -> None:
     """Dot-entries are skipped: Ruff plants a cache beside any config it finds."""
     shipped = sorted(
         item.name
@@ -33,7 +35,7 @@ def test_the_starter_directory_ships_three_files(default_assets: Path) -> None:
         if not item.name.startswith(".")
     )
 
-    assert shipped == ["checksmith.yaml", "ruff.toml", "semgrep.yaml"]
+    assert shipped == ["checksmith.yaml", "coverage.toml", "ruff.toml", "semgrep.yaml"]
 
 
 def test_the_starter_config_loads_through_the_real_loader(
@@ -46,7 +48,9 @@ def test_the_starter_config_loads_through_the_real_loader(
 
     # ``project_root: ../../..`` resolves against the config directory.
     assert config.project_root == default_assets.parents[2]
-    assert tuple(check.id for check in config.checks) == ("ruff", "semgrep", "ty")
+    assert tuple(check.id for check in config.checks) == (
+        "ruff", "semgrep", "ty", "pytest", "pyarchgraph"
+    )
 
 
 def test_the_starter_config_references_only_files_it_ships_with(
@@ -64,7 +68,9 @@ def test_the_starter_config_references_only_files_it_ships_with(
     )
 
     for check, filenames in zip(
-        config.checks, (("ruff.toml",), ("semgrep.yaml",), ()), strict=True
+        config.checks,
+        (("ruff.toml",), ("semgrep.yaml",), (), ("coverage.toml",), ()),
+        strict=True,
     ):
         paths = tuple(
             argument.config_path
@@ -144,6 +150,9 @@ def test_the_starter_config_asks_for_the_output_its_command_reads(
     assert config.checks[2].command is CommandName.TY
     assert "--output-format" in config.checks[2].args
     assert "gitlab" in config.checks[2].args
+    assert config.checks[4].command is CommandName.PYARCHGRAPH
+    assert "--output" in config.checks[4].args
+    assert "json" in config.checks[4].args
 
 
 def test_the_starter_config_builds_a_ty_invocation(default_assets: Path) -> None:
@@ -165,13 +174,113 @@ def test_the_starter_config_builds_a_ty_invocation(default_assets: Path) -> None
     )
 
 
-def test_the_starter_checks_use_the_python_package_type(default_assets: Path) -> None:
+def test_the_starter_config_builds_a_project_pytest_invocation(
+    default_assets: Path,
+) -> None:
     config = Config.from_path(
         config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
 
-    assert all(check.package_type is PackageType.UVX for check in config.checks)
+    check = config.checks[3]
+    assert check.command is CommandName.PYTEST
+    assert check.package is None
+    assert check.argv == (
+        "uv",
+        "run",
+        "--locked",
+        "pytest",
+        "tests",
+        "--cov=.",
+        "--cov-config",
+        str(default_assets / "coverage.toml"),
+        "--cov-report=term-missing",
+        "--cov-fail-under=90",
+    )
+
+
+def test_the_starter_config_builds_a_pyarchgraph_invocation(default_assets: Path) -> None:
+    config = Config.from_path(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+
+    assert config.checks[4].argv == (
+        "uvx",
+        "--from",
+        (
+            "pyarchgraph @ git+https://github.com/danballance/pyarchgraph"
+            "@9d48623d405034f6f32b6eb87f059a2713f1e900"
+        ),
+        "pyarchgraph",
+        ".",
+        "--project-root",
+        ".",
+        "--output",
+        "json",
+        "--output-dir",
+        "build/pyarchgraph",
+    )
+
+
+def test_the_starter_pyarchgraph_check_runs_with_and_without_a_baseline(
+    default_assets: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = Config.from_path(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+    check = config.checks[4]
+    command = PyArchGraphCommand()
+    baseline = tmp_path / "build/pyarchgraph/baseline/dependency-graph.json"
+    current = tmp_path / "build/pyarchgraph/current/dependency-graph.json"
+    calls = stub_analysis(
+        monkeypatch=monkeypatch, report_path=current, content=HEALTHY_REPORT
+    )
+
+    standalone = command.run(check=check, project_root=tmp_path)
+
+    assert standalone.status is CheckStatus.PASSED
+    assert not baseline.exists()
+    assert calls[0].arguments == (*check.arguments[:-1], str(current.parent))
+    calls = stub_analysis(
+        monkeypatch=monkeypatch, report_path=baseline, content=HEALTHY_REPORT
+    )
+
+    prepared = command.prepare(check=check, project_root=tmp_path)
+
+    assert prepared.status is CheckStatus.PASSED
+    assert calls[0].arguments == (*check.arguments[:-1], str(baseline.parent))
+    calls = stub_analysis(
+        monkeypatch=monkeypatch,
+        report_path=current,
+        content=report_json(known=1, possible=0),
+    )
+
+    declined = command.run(check=check, project_root=tmp_path)
+
+    assert declined.status is CheckStatus.FAILED
+    assert calls[0].arguments == (*check.arguments[:-1], str(current.parent))
+    assert baseline.read_text(encoding="utf-8") == HEALTHY_REPORT
+
+
+def test_the_starter_checks_choose_their_execution_environments(
+    default_assets: Path,
+) -> None:
+    config = Config.from_path(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+
+    assert tuple(check.package_type for check in config.checks) == (
+        PackageType.UVX,
+        PackageType.UVX,
+        PackageType.UVX,
+        PackageType.UV,
+        PackageType.UVX,
+    )
 
 
 def test_the_starter_ruff_configuration_is_a_standalone_one(
