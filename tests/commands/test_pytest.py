@@ -1,4 +1,5 @@
-import subprocess
+import logging
+import shlex
 from collections.abc import Callable
 from os import stat_result
 from pathlib import Path
@@ -121,11 +122,13 @@ def test_quiet_pytest_results_do_not_require_a_terminal_summary(
     assert result.messages == ()
 
 
-def test_pytest_uses_the_uv_project_interpreter_and_closed_stdin(
+def test_pytest_uses_the_uv_project_interpreter(
     configured_check: Check,
     project_root: Path,
     processes: FakeProcesses,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="checksmith.commands.command")
     processes.exit_code = 10
 
     result = PytestCommand().run(check=configured_check, project_root=project_root)
@@ -135,9 +138,16 @@ def test_pytest_uses_the_uv_project_interpreter_and_closed_stdin(
     assert "import pytest" in process.argv[5]
     assert process.argv[6:] == ("tests",)
     assert process.cwd == project_root
-    assert process.stdin == subprocess.DEVNULL
+    assert process.check_id == "unit-tests"
     assert result.check_id == "unit-tests"
     assert result.status is CheckStatus.PASSED
+    message = next(
+        text for text in caplog.messages if text.startswith("unit-tests command=")
+    )
+    rendered = message.removeprefix("unit-tests command=").removesuffix(
+        f" cwd={project_root}"
+    )
+    assert tuple(shlex.split(rendered)) == process.argv
 
 
 def test_custom_arguments_and_config_paths_reach_pytest_unchanged(

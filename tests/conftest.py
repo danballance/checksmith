@@ -3,7 +3,7 @@
 import logging
 import subprocess
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -112,7 +112,8 @@ class StartedProcess(BaseModel):
     cwd: Path
     """Recorded as a path, though the standard library is handed a string."""
 
-    stdin: int
+    check_id: str
+    heartbeat_interval_seconds: float
 
 
 class FakeProcesses:
@@ -132,25 +133,23 @@ class FakeProcesses:
 
     def run(
         self,
-        argv: Sequence[str],
         *,
-        cwd: str,
-        stdin: int,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        check: bool,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
-        """Stand in for :func:`subprocess.run`, recording rather than starting.
-
-        The signature is itself the assertion: a caller that stopped passing any
-        one of these explicitly fails here with a ``TypeError`` rather than
-        quietly taking the standard library's default for it.
-        """
         if self.refusal is not None:
             # Nothing is recorded: a process that never started is not one.
             raise self.refusal
-        self.started.append(StartedProcess(argv=tuple(argv), cwd=cwd, stdin=stdin))
+        self.started.append(
+            StartedProcess(
+                argv=argv,
+                cwd=cwd,
+                check_id=check_id,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+            )
+        )
         return subprocess.CompletedProcess(
             args=list(argv),
             returncode=self.exit_code,
@@ -167,5 +166,5 @@ def processes(monkeypatch: pytest.MonkeyPatch) -> FakeProcesses:
     the network and run it --- slow, and answering differently on every machine.
     """
     fake = FakeProcesses()
-    monkeypatch.setattr(subprocess, "run", fake.run)
+    monkeypatch.setattr("checksmith.commands.command.run_process", fake.run)
     return fake

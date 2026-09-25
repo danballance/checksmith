@@ -2,7 +2,7 @@
 
 import logging
 import os
-import subprocess
+import shlex
 import tomllib
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -16,6 +16,7 @@ from checksmith.errors import (
     CheckOutputError,
     CheckPrerequisiteError,
 )
+from checksmith.processes import run_process
 
 logger = logging.getLogger(__name__)
 
@@ -73,29 +74,15 @@ class Command(ABC):
         if check.package_type is PackageType.UV:
             self._require_uv_project(check=check, project_root=project_root)
         logger.debug("%s argv=%s cwd=%s", check.id, argv, project_root)
+        logger.debug("%s command=%s cwd=%s", check.id, shlex.join(argv), project_root)
         try:
-            completed = subprocess.run(
-                argv,
-                # Stringified here rather than left to the standard library:
-                # when the root is the thing that is missing, the operating
-                # system quotes what it was handed, and a ``PosixPath(...)``
-                # repr in a diagnostic is Checksmith's noise, not the OS's.
-                cwd=str(project_root),
-                stdin=subprocess.DEVNULL,
-                capture_output=True,
-                text=True,
-                # No ``errors`` override: a tool emitting bytes that are not
-                # UTF-8 fails here rather than having its output patched into
-                # something ``process_response`` would go on to misread.
-                encoding="utf-8",
-                # A linter exits nonzero for the ordinary reason that it found
-                # something. Raising would make every failing check an error,
-                # which is the distinction ``process_response`` exists to draw.
-                check=False,
+            completed = run_process(
+                check_id=check.id,
+                argv=argv,
+                cwd=project_root,
+                heartbeat_interval_seconds=10.0,
             )
         except OSError as error:
-            # The program is missing, or the root is. Either way nothing ran,
-            # and the check's id is the only thing that says which one.
             raise CheckExecutionError(
                 check_id=check.id,
                 program=argv[0],
@@ -116,6 +103,7 @@ class Command(ABC):
             len(completed.stdout),
             len(completed.stderr),
         )
+        logger.debug("%s processing output", check.id)
         return self.process_response(
             check_id=check.id,
             project_root=project_root,

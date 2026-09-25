@@ -2,7 +2,8 @@
 
 import json
 import subprocess
-from collections.abc import Callable, Iterable, Mapping, Sequence
+import sys
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,7 @@ from checksmith.dtos import (
 from checksmith.errors import CheckOutputError, ConfigSyntaxError
 from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
+from checksmith.packages import UvxPackage
 from tests.commands.test_pyarchgraph import standalone_report_json, write_report
 from tests.conftest import FakeProcesses
 
@@ -94,6 +96,74 @@ def test_check_requires_a_config_to_be_named(
     assert result.exit_code == ExitCode.ERROR
     assert "Missing option" in result.stderr
     assert "--config" in result.stderr
+
+
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+@pytest.mark.parametrize(
+    ("prefix", "suffix"),
+    [((), ()), (("--debug",), ()), (("-d",), ()), ((), ("--debug",)), ((), ("-d",))],
+)
+def test_process_debug_output_stays_on_stderr(
+    cli_runner: CliRunner,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fmt: OutputFormat,
+    prefix: tuple[str, ...],
+    suffix: tuple[str, ...],
+) -> None:
+    source = "import sys; print('[]'); sys.stderr.write('tool progress\\n')"
+
+    def python_argv(
+        self: UvxPackage,
+        *,
+        package: str | None,
+        command: str,
+        arguments: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        return (sys.executable, "-c", source)
+
+    monkeypatch.setattr(UvxPackage, "build_argv", python_argv)
+    monkeypatch.setenv("COLUMNS", "300")
+
+    result = cli_runner.invoke(
+        app,
+        [
+            *prefix,
+            "check",
+            "--config",
+            str(config_file),
+            "--format",
+            fmt.value,
+            *suffix,
+        ],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    if prefix or suffix:
+        for message in (
+            "starting check 1/1: ruff",
+            "ruff argv=",
+            "ruff command=",
+            "ruff started program=",
+            "pid=",
+            "stderr: tool progress",
+            "process exited",
+            "elapsed=",
+            "ruff processing output",
+            "ruff status=passed",
+        ):
+            assert message in result.stderr
+    else:
+        assert result.stderr == ""
+    assert "tool progress" not in result.stdout
+    assert "DEBUG" not in result.stdout
+    if fmt is OutputFormat.JSON:
+        output = CheckOutput.model_validate_json(result.stdout)
+        assert output.results == (
+            CheckResult(check_id="ruff", status=CheckStatus.PASSED, messages=()),
+        )
+    else:
+        assert "PASS" in result.stdout
 
 
 def test_check_loads_the_named_config_and_runs_what_it_declares(
@@ -727,29 +797,23 @@ def stub_pyarchgraph_process(
     content: str | None,
 ) -> None:
     def run(
-        argv: Sequence[str],
         *,
-        cwd: str,
-        stdin: int,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        check: bool,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
         output_dir = Path(argv[argv.index("--output-dir") + 1])
         if content is not None:
             write_report(path=output_dir / "dependency-graph.json", content=content)
         return processes.run(
-            argv,
+            check_id=check_id,
+            argv=argv,
             cwd=cwd,
-            stdin=stdin,
-            capture_output=capture_output,
-            text=text,
-            encoding=encoding,
-            check=check,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         )
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("checksmith.commands.command.run_process", run)
 
 
 @pytest.mark.parametrize("output_format", ["text", "json"])

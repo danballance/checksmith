@@ -1,7 +1,8 @@
 """Tests for :mod:`checksmith.runner`."""
 
+import logging
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 import pytest
@@ -285,14 +286,11 @@ def test_a_mixed_suite_uses_each_commands_report_format(
     )
 
     def run(
-        argv: Sequence[str],
         *,
-        cwd: str,
-        stdin: int,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        check: bool,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
         reports = {
             "ruff": "[]",
@@ -301,16 +299,13 @@ def test_a_mixed_suite_uses_each_commands_report_format(
         }
         processes.stdout = reports[argv[3]]
         return processes.run(
-            argv,
+            check_id=check_id,
+            argv=argv,
             cwd=cwd,
-            stdin=stdin,
-            capture_output=capture_output,
-            text=text,
-            encoding=encoding,
-            check=check,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         )
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("checksmith.commands.command.run_process", run)
 
     output = Runner(
         checks=checks,
@@ -350,7 +345,9 @@ def test_a_mixed_suite_uses_each_commands_report_format(
 )
 def test_a_tool_error_preserves_prior_results_and_runs_later_checks(
     error: CheckExecutionError | CheckOutputError,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="checksmith.runner")
     passing = CheckResult(check_id="before", status=CheckStatus.PASSED, messages=())
     failing = CheckResult(
         check_id="violations",
@@ -386,6 +383,13 @@ def test_a_tool_error_preserves_prior_results_and_runs_later_checks(
         later,
     )
     assert output.exit_code is ExitCode.ERROR
+    assert [text for text in caplog.messages if text.startswith("starting check")] == [
+        f"starting check {index}/4: {check_id}"
+        for index, check_id in enumerate(check_ids, start=1)
+    ]
+    assert caplog.messages.index("broken status=error messages=1") < (
+        caplog.messages.index("starting check 4/4: after")
+    )
 
 
 def test_unexpected_command_bugs_are_not_reported_as_tool_results(
@@ -452,7 +456,10 @@ def test_non_runnable_checks_never_start_a_subprocess(
     checks: tuple[Check, ...],
     processes: FakeProcesses,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="checksmith")
+
     def not_runnable(self: Command, *, check: Check, project_root: Path) -> bool:
         return False
 
@@ -468,6 +475,11 @@ def test_non_runnable_checks_never_start_a_subprocess(
     assert tuple(result.check_id for result in output.results) == ("lint", "format")
     assert all(result.status is CheckStatus.SKIPPED for result in output.results)
     assert output.exit_code is ExitCode.SUCCESS
+    assert "starting check 1/2: lint" in caplog.messages
+    assert "lint status=skipped messages=1" in caplog.messages
+    assert not any(
+        "command=" in text or "started program=" in text for text in caplog.messages
+    )
 
 
 def test_a_prerequisite_error_preserves_results_and_runs_later_checks() -> None:
@@ -531,7 +543,9 @@ def test_an_unexpected_eligibility_bug_propagates_without_starting_the_check(
 
 def test_prepare_calls_each_hook_once_without_checking_normal_eligibility(
     checks: tuple[Check, ...],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level(logging.DEBUG, logger="checksmith.runner")
     prepared = tuple(
         CheckResult(check_id=check.id, status=CheckStatus.PASSED, messages=())
         for check in checks
@@ -550,6 +564,8 @@ def test_prepare_calls_each_hook_once_without_checking_normal_eligibility(
     assert recorder.calls == [("prepare", check, PROJECT_ROOT) for check in checks]
     assert output.results == prepared
     assert output.exit_code is ExitCode.SUCCESS
+    assert "starting preparation 1/2: lint" in caplog.messages
+    assert "starting preparation 2/2: format" in caplog.messages
 
 
 def test_prepare_skips_commands_without_a_preparation_hook(

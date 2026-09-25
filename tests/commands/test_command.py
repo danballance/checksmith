@@ -1,5 +1,7 @@
 """Tests for :mod:`checksmith.commands.command`."""
 
+import logging
+import shlex
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -159,13 +161,53 @@ def test_a_check_is_started_in_the_project_root_it_was_given(
     assert processes.started[0].cwd == PROJECT_ROOT
 
 
-def test_stdin_is_closed_so_a_tool_that_asks_a_question_cannot_hang(
+def test_process_diagnostics_receive_the_check_id_and_reporting_interval(
     processes: FakeProcesses,
 ) -> None:
-    """Nobody is watching a quality gate; a prompt must fail rather than wait."""
     RecordingCommand().run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
 
-    assert processes.started[0].stdin == subprocess.DEVNULL
+    assert processes.started[0].check_id == "lint"
+    assert processes.started[0].heartbeat_interval_seconds == 10.0
+
+
+def test_both_command_formats_are_logged_before_launch(
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="checksmith.commands.command")
+    project_root = Path("/workspace/project with spaces")
+    check = ruff_check(check_id="lint").model_copy(
+        update={"args": ("check", "src/two words.py", "quote'", "", "$(literal)")}
+    )
+
+    def run(
+        *,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        assert f"lint argv={argv} cwd={cwd}" in caplog.messages
+        message = next(
+            text for text in caplog.messages if text.startswith("lint command=")
+        )
+        rendered = message.removeprefix("lint command=").removesuffix(f" cwd={cwd}")
+        assert tuple(shlex.split(rendered)) == argv
+        assert not processes.started
+        return processes.run(
+            check_id=check_id,
+            argv=argv,
+            cwd=cwd,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+
+    monkeypatch.setattr("checksmith.commands.command.run_process", run)
+
+    RecordingCommand().run(check=check, project_root=project_root)
+
+    assert len(processes.started) == 1
+    assert caplog.messages[-1] == "lint processing output"
 
 
 def test_a_program_that_cannot_be_started_names_the_check_that_wanted_it(
@@ -214,18 +256,15 @@ def test_invalid_utf8_output_is_a_check_output_error(
     decoding_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
     def refuse_decoding(
-        argv: tuple[str, ...],
         *,
-        cwd: str,
-        stdin: int,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        check: bool,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
         raise decoding_error
 
-    monkeypatch.setattr(subprocess, "run", refuse_decoding)
+    monkeypatch.setattr("checksmith.commands.command.run_process", refuse_decoding)
     check = Check(
         id="encoding-check",
         package_type=PackageType.UVX,

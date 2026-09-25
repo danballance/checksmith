@@ -1,6 +1,5 @@
 import json
 import subprocess
-from collections.abc import Sequence
 from os import stat_result
 from pathlib import Path
 from typing import Final
@@ -632,14 +631,11 @@ def test_preparation_requires_a_successful_process_and_a_fresh_valid_report(
     baseline = tmp_path / "build/baseline/dependency-graph.json"
 
     def run(
-        argv: Sequence[str],
         *,
-        cwd: str,
-        stdin: int,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        check: bool,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
         output_dir = Path(argv[argv.index("--output-dir") + 1])
         write_report(
@@ -647,16 +643,13 @@ def test_preparation_requires_a_successful_process_and_a_fresh_valid_report(
             content=report_json(known=1, possible=2),
         )
         return processes.run(
-            argv,
+            check_id=check_id,
+            argv=argv,
             cwd=cwd,
-            stdin=stdin,
-            capture_output=capture_output,
-            text=text,
-            encoding=encoding,
-            check=check,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         )
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("checksmith.commands.command.run_process", run)
     processes.exit_code = exit_code
     command = PyArchGraphCommand()
     check = architecture_check(args=ARGS)
@@ -866,29 +859,23 @@ def stub_process_analysis(
     content: str | None,
 ) -> None:
     def run(
-        argv: Sequence[str],
         *,
-        cwd: str,
-        stdin: int,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        check: bool,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
     ) -> subprocess.CompletedProcess[str]:
         assert not report_path.exists(), "Previous report must be removed before run"
         if content is not None:
             write_report(path=report_path, content=content)
         return processes.run(
-            argv,
+            check_id=check_id,
+            argv=argv,
             cwd=cwd,
-            stdin=stdin,
-            capture_output=capture_output,
-            text=text,
-            encoding=encoding,
-            check=check,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
         )
 
-    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr("checksmith.commands.command.run_process", run)
 
 
 @pytest.mark.parametrize(

@@ -50,7 +50,14 @@ class Runner:
             "%s %d checks", "preparing" if preparing else "running", len(self.checks)
         )
         results: list[CheckResult] = []
-        for check in self.checks:
+        for index, check in enumerate(self.checks, start=1):
+            logger.debug(
+                "starting %s %d/%d: %s",
+                "preparation" if preparing else "check",
+                index,
+                len(self.checks),
+                check.id,
+            )
             command = self.commands[check.command]
             try:
                 if preparing:
