@@ -43,3 +43,30 @@ checks:
       - gitlab
       - --error-on-warning
       - .
+
+  - id: pytest
+    package_type: uv
+    package: null
+    command: pytest
+
+    args:
+      - tests
+      - --cov=.
+      - --cov-config
+      - config_path: coverage.toml
+      - --cov-report=term-missing
+      - --cov-fail-under=90
+
+  - id: pyarchgraph
+    package_type: uvx
+    package: "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@9d48623d405034f6f32b6eb87f059a2713f1e900"
+    command: pyarchgraph
+
+    args:
+      - .
+      - --project-root
+      - .
+      - --output
+      - json
+      - --output-dir
+      - build/pyarchgraph
