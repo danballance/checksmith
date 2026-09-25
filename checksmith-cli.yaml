@@ -112,6 +112,13 @@ command:
               description: >-
                 Path to a config file. A relative path resolves from the
                 caller's current directory.
+
+        - name: --check
+          required: false
+          description: Select one configured check by its exact ID; omit to select all.
+          arguments:
+            - name: id
+              required: true
       metadata:
         - name: checksmith.operation
           value:
@@ -150,6 +157,13 @@ command:
                 caller's current directory. Checksmith never searches for a
                 config file and never falls back to another file: if the named
                 path cannot be read, that is an error.
+
+        - name: --check
+          required: false
+          description: Select one configured check by its exact ID; omit to select all.
+          arguments:
+            - name: id
+              required: true
       metadata:
         - name: checksmith.operation
           value:

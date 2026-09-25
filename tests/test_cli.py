@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 import typer
 import yaml
-from typer.core import TyperGroup
+from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
 from checksmith import __version__
@@ -21,6 +21,7 @@ from checksmith.cli import (
     app,
 )
 from checksmith.commands.command import Command
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import (
     CheckResult,
@@ -118,6 +119,231 @@ def test_check_loads_the_named_config_and_runs_what_it_declares(
     assert result.exit_code == ExitCode.SUCCESS
     assert "ruff" in result.stdout
     assert "PASS" in result.stdout
+
+
+@pytest.fixture
+def selection_config_file(config_file: Path) -> Path:
+    config_file.write_text(
+        config_file.read_text(encoding="utf-8").replace("id: ruff", "id: lint-src")
+        + "\n"
+        "  - id: lint-tests\n"
+        "    package_type: uvx\n"
+        '    package: "ruff==0.16.7"\n'
+        "    command: ruff\n"
+        "    args:\n"
+        "      - check\n"
+        "      - --config\n"
+        "      - config_path: ruff.toml\n"
+        "      - --output-format\n"
+        "      - json\n"
+        "      - tests\n",
+        encoding="utf-8",
+    )
+    return config_file
+
+
+@pytest.mark.parametrize("check_id", [None, "lint-tests"])
+def test_selection_preserves_arguments_and_project_root(
+    cli_runner: CliRunner,
+    selection_config_file: Path,
+    processes: FakeProcesses,
+    monkeypatch: pytest.MonkeyPatch,
+    check_id: str | None,
+) -> None:
+    monkeypatch.chdir(selection_config_file.parent)
+    processes.stdout = "[]"
+    arguments = ["check", "--config", "checksmith.yaml", "--format", "json"]
+    if check_id is not None:
+        arguments.extend(["--check", check_id])
+
+    result = cli_runner.invoke(app, arguments)
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    expected_ids = ["lint-src", "lint-tests"] if check_id is None else ["lint-tests"]
+    expected_targets = (".", "tests") if check_id is None else ("tests",)
+    assert json.loads(result.stdout) == {
+        "results": [
+            {"check_id": expected_id, "status": "passed", "messages": []}
+            for expected_id in expected_ids
+        ]
+    }
+    assert [process.argv for process in processes.started] == [
+        (
+            "uvx",
+            "--from",
+            "ruff==0.16.7",
+            "ruff",
+            "check",
+            "--config",
+            str(selection_config_file.parent / "ruff.toml"),
+            "--output-format",
+            "json",
+            target,
+        )
+        for target in expected_targets
+    ]
+    assert all(
+        process.cwd == selection_config_file.parent.parent
+        for process in processes.started
+    )
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+@pytest.mark.parametrize(
+    ("status", "expected_exit_code", "label"),
+    [
+        (CheckStatus.PASSED, ExitCode.SUCCESS, "PASS"),
+        (CheckStatus.FAILED, ExitCode.UNHEALTHY, "FAIL"),
+        (CheckStatus.ERROR, ExitCode.ERROR, "ERROR"),
+        (CheckStatus.SKIPPED, ExitCode.SUCCESS, "SKIP"),
+    ],
+)
+def test_only_the_selected_check_runs_its_hooks_and_reports_a_result(
+    cli_runner: CliRunner,
+    selection_config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+    fmt: OutputFormat,
+    status: CheckStatus,
+    expected_exit_code: ExitCode,
+    label: str,
+) -> None:
+    eligibility_checks: list[str] = []
+    executed: list[str] = []
+    skipped = operation == "check" and status is CheckStatus.SKIPPED
+    expected = CheckResult(
+        check_id="lint-tests",
+        status=status,
+        messages=("Check is not applicable to this project.",) if skipped else (),
+    )
+
+    def is_runnable(command: Command, *, check: Check, project_root: Path) -> bool:
+        eligibility_checks.append(check.id)
+        return status is not CheckStatus.SKIPPED
+
+    def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
+        executed.append(check.id)
+        assert check.id == "lint-tests"
+        assert project_root == selection_config_file.parent.parent
+        assert check.arguments == (
+            "check",
+            "--config",
+            str(selection_config_file.parent / "ruff.toml"),
+            "--output-format",
+            "json",
+            "tests",
+        )
+        return expected
+
+    monkeypatch.setattr(Command, "check_is_runnable", is_runnable)
+    monkeypatch.setattr(Command, "prepare" if operation == "prepare" else "run", run)
+
+    result = cli_runner.invoke(
+        app,
+        [
+            operation,
+            "--config",
+            str(selection_config_file),
+            "--check",
+            "lint-tests",
+            "--format",
+            fmt.value,
+        ],
+    )
+
+    assert result.exit_code == expected_exit_code
+    assert result.stderr == ""
+    assert eligibility_checks == (["lint-tests"] if operation == "check" else [])
+    assert executed == ([] if skipped else ["lint-tests"])
+    if fmt is OutputFormat.JSON:
+        assert json.loads(result.stdout) == {
+            "results": [expected.model_dump(mode="json")]
+        }
+    else:
+        assert "lint-tests" in result.stdout
+        assert "lint-src" not in result.stdout
+        assert label in result.stdout
+
+
+@pytest.fixture
+def forbid_command_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    def registry() -> Mapping[CommandName, Command]:
+        pytest.fail("Invalid input must fail before constructing commands")
+
+    monkeypatch.setattr(CommandFactory, "registry", registry)
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
+@pytest.mark.parametrize(
+    "check_id", ["unknown", "", "LINT-TESTS", "lint", "lint-*", "ruff"]
+)
+def test_an_unknown_check_id_fails_before_execution(
+    cli_runner: CliRunner,
+    selection_config_file: Path,
+    forbid_command_registry: None,
+    operation: str,
+    fmt: OutputFormat,
+    check_id: str,
+) -> None:
+    result = cli_runner.invoke(
+        app,
+        [
+            operation,
+            "--config",
+            str(selection_config_file),
+            "--check",
+            check_id,
+            "--format",
+            fmt.value,
+        ],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stdout == ""
+    assert result.stderr == (
+        f"checksmith error: Unknown check ID {check_id!r}. "
+        "Available check IDs: 'lint-src', 'lint-tests'.\n"
+    )
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("check_id", [None, "lint-tests"])
+@pytest.mark.parametrize(
+    ("original", "replacement", "diagnostic"),
+    [
+        ("id: lint-src", "id: lint-tests", "duplicate check ID 'lint-tests'"),
+        ("id: lint-src", 'id: ""', "checks.0.id"),
+    ],
+)
+def test_selection_still_validates_the_complete_configuration(
+    cli_runner: CliRunner,
+    selection_config_file: Path,
+    forbid_command_registry: None,
+    operation: str,
+    check_id: str | None,
+    original: str,
+    replacement: str,
+    diagnostic: str,
+) -> None:
+    selection_config_file.write_text(
+        selection_config_file.read_text(encoding="utf-8").replace(original, replacement),
+        encoding="utf-8",
+    )
+    arguments = [
+        operation, "--config", str(selection_config_file), "--format", "json"
+    ]
+    if check_id is not None:
+        arguments.extend(["--check", check_id])
+
+    result = cli_runner.invoke(app, arguments)
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stdout == ""
+    assert result.stderr.startswith("checksmith error:")
+    assert diagnostic in result.stderr
 
 
 def test_a_check_that_found_something_reports_it_and_exits_unhealthy(
@@ -1346,6 +1572,34 @@ def test_output_format_values_match_the_cli_schema() -> None:
 
 
 CLI_SCHEMA_PATH = Path(__file__).parent.parent / "checksmith-cli.yaml"
+
+
+@pytest.mark.parametrize("operation", ["check", "prepare"])
+def test_check_selector_matches_the_cli_schema_and_appears_in_help(
+    cli_runner: CliRunner,
+    operation: str,
+) -> None:
+    schema = yaml.safe_load(CLI_SCHEMA_PATH.read_text(encoding="utf-8"))
+    command = next(
+        entry for entry in schema["command"]["commands"]
+        if entry["name"] == operation
+    )
+    declared = next(option for option in command["options"] if option["name"] == "--check")
+    root = typer.main.get_command(app)
+    assert isinstance(root, TyperGroup)
+    option = next(
+        parameter for parameter in root.commands[operation].params
+        if parameter.name == "check_id"
+    )
+
+    assert isinstance(option, TyperOption)
+    assert option.opts == [declared["name"]]
+    assert option.required is declared["required"] is False
+    assert option.nargs == len(declared["arguments"]) == 1
+    assert declared["arguments"][0]["required"] is True
+    result = cli_runner.invoke(app, [operation, "--help"])
+    assert result.exit_code == ExitCode.SUCCESS
+    assert "--check" in result.stdout
 
 
 def _schema_command_paths(

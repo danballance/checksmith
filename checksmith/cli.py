@@ -47,6 +47,15 @@ ConfigOption = Annotated[
     ),
 ]
 
+CheckOption = Annotated[
+    str | None,
+    typer.Option(
+        "--check",
+        metavar="ID",
+        help="Select one configured check by its exact ID; omit to select all.",
+    ),
+]
+
 DebugOption = Annotated[
     bool,
     typer.Option(*DEBUG_FLAGS, help="Write debug logging to stderr."),
@@ -169,13 +178,21 @@ def init() -> None:
     raise NotImplementedError
 
 
-def _runner_from_config(config_file: Path) -> Runner:
+def _runner_from_config(config_file: Path, check_id: str | None) -> Runner:
     config = Config.from_path(
         config_file=config_file,
         working_directory=Path.cwd(),
     )
+    checks = config.checks
+    if check_id is not None:
+        checks = tuple(check for check in checks if check.id == check_id)
+        if not checks:
+            available = ", ".join(repr(check.id) for check in config.checks)
+            raise ChecksmithError(
+                f"Unknown check ID {check_id!r}. Available check IDs: {available}."
+            )
     return Runner(
-        checks=config.checks,
+        checks=checks,
         commands=CommandFactory.registry(),
         project_root=config.project_root,
     )
@@ -185,18 +202,20 @@ def _runner_from_config(config_file: Path) -> Runner:
 def prepare(
     config_file: ConfigOption,
     fmt: FormatOption = OutputFormat.TEXT,
+    check_id: CheckOption = None,
 ) -> None:
     """Prepare configured checks before coding begins."""
-    _emit(_runner_from_config(config_file).prepare(), fmt)
+    _emit(_runner_from_config(config_file=config_file, check_id=check_id).prepare(), fmt)
 
 
 @app.command("check")
 def check(
     config_file: ConfigOption,
     fmt: FormatOption = OutputFormat.TEXT,
+    check_id: CheckOption = None,
 ) -> None:
     """Execute the project's configured checks and report their results."""
-    _emit(_runner_from_config(config_file).check(), fmt)
+    _emit(_runner_from_config(config_file=config_file, check_id=check_id).check(), fmt)
 
 
 if __name__ == "__main__":

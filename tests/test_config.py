@@ -248,11 +248,31 @@ def test_one_broken_check_is_not_also_reported_as_no_checks() -> None:
     assert fields_of(reject(document(checks=[check(id="")]))) == ("checks.0.id",)
 
 
-def test_two_checks_may_share_an_id() -> None:
-    """Dropped as more machinery than it earned: the output shows two like rows."""
-    body = document(checks=[check(id="ruff"), check(id="ruff")])
+@pytest.mark.parametrize(
+    ("check_ids", "duplicate_id"),
+    [
+        (("ruff", "ruff"), "ruff"),
+        (("ruff", "ty", "ruff"), "ruff"),
+        (("ruff", "ty", "ty"), "ty"),
+    ],
+)
+def test_check_ids_must_be_unique(
+    check_ids: tuple[str, ...],
+    duplicate_id: str,
+) -> None:
+    body = document(checks=[check(id=check_id) for check_id in check_ids])
 
-    assert tuple(item.id for item in parse(body).checks) == ("ruff", "ruff")
+    error = reject(body)
+
+    assert fields_of(error) == ("checks",)
+    assert f"duplicate check ID {duplicate_id!r}" in str(error)
+    assert "IDs must be unique" in str(error)
+
+
+def test_check_ids_are_case_sensitive() -> None:
+    body = document(checks=[check(id="ruff"), check(id="Ruff")])
+
+    assert tuple(item.id for item in parse(body).checks) == ("ruff", "Ruff")
 
 
 @pytest.mark.parametrize("package_type", ["pipx", "", 1, None])

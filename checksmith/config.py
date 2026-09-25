@@ -182,6 +182,16 @@ class Config(BaseModel):
             raise ValueError("a config file must declare at least one check")
         return value
 
+    @field_validator("checks")
+    @classmethod
+    def _unique_check_ids(cls, value: tuple[Check, ...]) -> tuple[Check, ...]:
+        seen: set[str] = set()
+        for check in value:
+            if check.id in seen:
+                raise ValueError(f"duplicate check ID {check.id!r}; IDs must be unique")
+            seen.add(check.id)
+        return value
+
     @staticmethod
     def _read(*, path: Path) -> Mapping[object, object]:
         """Read one config file as plain data, or fail with what went wrong.
