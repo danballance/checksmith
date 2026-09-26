@@ -134,12 +134,12 @@ class UvxPackage(Package):
         return PackageType.UVX
 
     def validate_package(self, *, package: str | None) -> None:
-        """Require a version constraint or a Git HTTPS URL pinned to a commit.
+        """Require a version constraint or a Git HTTPS URL with an explicit ref.
 
         ``packaging`` owns the grammar, so extras and markers are accepted for
         versioned requirements and named Git requirements alike. Direct URLs
-        must identify a repository and a full commit, without query or fragment
-        options; branches and tags may change between runs.
+        must identify a repository and a ref, without query or fragment options.
+        uv resolves refs; only full commit hashes are treated as immutable.
         """
         if package is None:
             raise ValueError("uvx package must name a versioned package, got null")
@@ -152,7 +152,7 @@ class UvxPackage(Package):
         if requirement.url is not None:
             problem = (
                 "uvx URL package must use git+https with a hostname, repository "
-                "path and full 40-character hexadecimal commit, without query "
+                "path and explicit Git ref, without query "
                 f"or fragment, got: {package!r}"
             )
             try:
@@ -163,7 +163,7 @@ class UvxPackage(Package):
                     and not any(character.isspace() for character in url.netloc)
                     and "\\" not in url.netloc
                     and (url.port is None or 1 <= url.port <= 65535)
-                    and re.fullmatch(r"/[^@\s\\]+@[0-9a-fA-F]{40}", url.path)
+                    and re.fullmatch(r"/[^@\s\\]+@[^@\s\\]+", url.path)
                     is not None
                     and "?" not in requirement.url
                     and "#" not in requirement.url

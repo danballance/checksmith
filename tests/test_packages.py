@@ -267,10 +267,10 @@ def test_a_requirement_naming_no_version_is_rejected(uvx_package: UvxPackage) ->
         uvx_package.validate_package(package="ruff")
 
 
-def test_an_unpinned_git_requirement_is_rejected(
+def test_a_git_requirement_without_an_explicit_ref_is_rejected(
     uvx_package: UvxPackage,
 ) -> None:
-    with pytest.raises(ValueError, match="full 40-character hexadecimal commit"):
+    with pytest.raises(ValueError, match="explicit Git ref"):
         uvx_package.validate_package(package="ruff @ git+https://example.com/ruff.git")
 
 
@@ -306,11 +306,11 @@ def test_a_named_git_requirement_pinned_to_a_full_commit_is_accepted(
     "url",
     [
         GIT_REPOSITORY,
-        f"{GIT_REPOSITORY}@main",
-        f"{GIT_REPOSITORY}@v0.1.0",
-        f"{GIT_REPOSITORY}@{GIT_COMMIT[:7]}",
-        f"{GIT_REPOSITORY}@{'g' * 40}",
-        f"{GIT_REPOSITORY}@{GIT_COMMIT}0",
+        f"{GIT_REPOSITORY}@",
+        f"{GIT_REPOSITORY}@@main",
+        f"{GIT_REPOSITORY}@feature\\example",
+        f"{GIT_REPOSITORY}@main?download=1",
+        f"{GIT_REPOSITORY}@main#subdirectory=src",
         f"{GIT_REPOSITORY}@{GIT_COMMIT}?download=1",
         f"{GIT_REPOSITORY}@{GIT_COMMIT}?",
         f"{GIT_REPOSITORY}@{GIT_COMMIT}#subdirectory=src",
@@ -328,16 +328,20 @@ def test_a_named_git_requirement_pinned_to_a_full_commit_is_accepted(
         f"git+https://example.com\\repository/project.git@{GIT_COMMIT}",
     ],
 )
-def test_git_sources_outside_the_pinned_https_scope_are_rejected(
+def test_git_sources_outside_the_explicit_https_ref_scope_are_rejected(
     url: str,
     uvx_package: UvxPackage,
 ) -> None:
-    with pytest.raises(ValueError, match="full 40-character hexadecimal commit"):
+    with pytest.raises(ValueError, match="explicit Git ref"):
         uvx_package.validate_package(package=f"pyarchgraph @ {url}")
 
 
-def test_a_git_requirement_reaches_uvx_unchanged(uvx_package: UvxPackage) -> None:
-    package = f"pyarchgraph @ {GIT_REPOSITORY}@{GIT_COMMIT}"
+@pytest.mark.parametrize("commit", [GIT_COMMIT, GIT_COMMIT.upper()])
+def test_a_pinned_git_requirement_reaches_uvx_without_refresh(
+    commit: str,
+    uvx_package: UvxPackage,
+) -> None:
+    package = f"pyarchgraph @ {GIT_REPOSITORY}@{commit}"
 
     argv = uvx_package.build_argv(
         package=package,
