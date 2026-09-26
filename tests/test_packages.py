@@ -356,6 +356,60 @@ def test_a_git_requirement_reaches_uvx_unchanged(uvx_package: UvxPackage) -> Non
     )
 
 
+@pytest.mark.parametrize(
+    "ref",
+    ["main", "feature/example", "v0.1.0", GIT_COMMIT[:7], "g" * 40, GIT_COMMIT + "0"],
+)
+def test_explicit_git_refs_are_refreshed_in_an_isolated_environment(
+    ref: str,
+    uvx_package: UvxPackage,
+) -> None:
+    package = f"analysis-tools @ git+https://example.com/tools.git@{ref}"
+
+    uvx_package.validate_package(package=package)
+    argv = uvx_package.build_argv(
+        package=package,
+        command="analyze",
+        arguments=("src directory", "--output", "json"),
+    )
+
+    assert argv == (
+        "uvx",
+        "--isolated",
+        "--refresh-package",
+        "analysis-tools",
+        "--from",
+        package,
+        "analyze",
+        "src directory",
+        "--output",
+        "json",
+    )
+
+
+def test_git_refresh_preserves_extras_and_markers(uvx_package: UvxPackage) -> None:
+    package = (
+        "Analysis.Tools[extra] @ git+https://example.com/tools.git@feature/example"
+        ' ; python_version >= "3.14"'
+    )
+
+    uvx_package.validate_package(package=package)
+
+    assert uvx_package.build_argv(
+        package=package,
+        command="analyze",
+        arguments=(),
+    ) == (
+        "uvx",
+        "--isolated",
+        "--refresh-package",
+        "Analysis.Tools",
+        "--from",
+        package,
+        "analyze",
+    )
+
+
 def test_a_requirement_that_does_not_parse_is_rejected(uvx_package: UvxPackage) -> None:
     with pytest.raises(ValueError, match="not a valid Python requirement"):
         uvx_package.validate_package(package="./local-ruff")

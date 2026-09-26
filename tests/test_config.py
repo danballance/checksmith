@@ -805,6 +805,28 @@ def test_pyarchgraph_can_run_from_its_pinned_git_source() -> None:
     assert configured.argv[:4] == ("uvx", "--from", package, "pyarchgraph")
 
 
+def test_a_git_branch_configuration_requests_refresh_and_isolation() -> None:
+    package = "analysis-tools @ git+https://example.com/tools.git@feature/parser"
+    configured = resolved(
+        command="pyarchgraph",
+        package=package,
+        args=["src", "--exclude", "vendor/*"],
+    )
+
+    assert configured.argv == (
+        "uvx",
+        "--isolated",
+        "--refresh-package",
+        "analysis-tools",
+        "--from",
+        package,
+        "pyarchgraph",
+        "src",
+        "--exclude",
+        "vendor/*",
+    )
+
+
 def test_a_check_with_no_arguments_still_builds_a_runnable_vector() -> None:
     assert resolved(args=[]).argv == ("uvx", "--from", "ruff==0.16.7", "ruff")
 

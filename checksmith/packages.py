@@ -193,7 +193,13 @@ class UvxPackage(Package):
     ) -> tuple[str, ...]:
         if package is None:
             raise ValueError("uvx package must name a versioned package, got null")
-        argv = ("uvx", "--from", package, command, *arguments)
+        requirement = Requirement(package)
+        refresh: tuple[str, ...] = ()
+        if requirement.url is not None:
+            ref = urlsplit(requirement.url).path.rpartition("@")[2]
+            if re.fullmatch(r"[0-9a-fA-F]{40}", ref) is None:
+                refresh = ("--isolated", "--refresh-package", requirement.name)
+        argv = ("uvx", *refresh, "--from", package, command, *arguments)
         logger.debug("uvx built %s", argv)
         return argv
 
