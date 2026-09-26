@@ -59,16 +59,12 @@ def forbidden_finding() -> dict[str, JsonValue]:
     }
 
 
-def import_finding(
-    kind: Literal["unresolved_import", "dynamic_import"],
-) -> dict[str, JsonValue]:
+def import_finding() -> dict[str, JsonValue]:
     return {
-        "kind": kind,
+        "kind": "unresolved_import",
         "source": "app",
         "requested": None,
-        "code": "missing_internal_target"
-        if kind == "unresolved_import"
-        else "dynamic_nonliteral",
+        "code": "missing_internal_target",
         "message": "Import needs review",
         "evidence": [
             {
@@ -127,12 +123,8 @@ def test_command_uses_normal_subprocess_execution(
             "Definite forbidden dependency (rules: app:service, app*:*)",
         ),
         (
-            import_finding("unresolved_import"),
+            import_finding(),
             "Unresolved import in app: Import needs review",
-        ),
-        (
-            import_finding("dynamic_import"),
-            "Dynamic import in app: Import needs review",
         ),
     ],
 )
@@ -256,16 +248,21 @@ def test_report_schema_is_strict(field: str, value: JsonValue, tmp_path: Path) -
         {**cycle_finding("definite"), "members": []},
         {**forbidden_finding(), "rules": []},
         {**forbidden_finding(), "witness": [dependency(), dependency()]},
-        {**import_finding("dynamic_import"), "evidence": []},
-        {**import_finding("dynamic_import"), "evidence": [{**evidence(), "line": 0}]},
+        {**import_finding(), "kind": "dynamic_import"},
+        {**import_finding(), "evidence": []},
+        {**import_finding(), "evidence": [{**evidence(), "line": 0}]},
         {
-            **import_finding("dynamic_import"),
+            **import_finding(),
             "evidence": [{**evidence(), "column": True}],
         },
-        {**import_finding("dynamic_import"), "evidence": [{**evidence(), "path": ""}]},
+        {**import_finding(), "evidence": [{**evidence(), "path": ""}]},
         {
-            **import_finding("dynamic_import"),
+            **import_finding(),
             "evidence": [{**evidence(), "resolution_kind": "unknown"}],
+        },
+        {
+            **import_finding(),
+            "evidence": [{**evidence(), "resolution_kind": "dynamic_literal"}],
         },
     ],
 )

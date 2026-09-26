@@ -24,8 +24,7 @@ class ImportEvidence(ReportModel):
     column: PositiveCount
     source_segment: str | None
     resolution_kind: (
-        Literal["exact_module", "exact_base", "probable_submodule", "dynamic_literal"]
-        | None
+        Literal["exact_module", "exact_base", "probable_submodule"] | None
     )
 
 
@@ -51,7 +50,7 @@ class ForbiddenDependencyFinding(ReportModel):
 
 
 class ImportFinding(ReportModel):
-    kind: Literal["unresolved_import", "dynamic_import"]
+    kind: Literal["unresolved_import"]
     source: Text
     requested: Text | None
     code: Text
@@ -82,13 +81,8 @@ def _evidence_text(evidence: tuple[ImportEvidence, ...]) -> str:
 
 def _finding_message(finding: Finding) -> str:
     if isinstance(finding, ImportFinding):
-        label = (
-            "Unresolved import"
-            if finding.kind == "unresolved_import"
-            else "Dynamic import"
-        )
         return (
-            f"{label} in {finding.source}: {finding.message} "
+            f"Unresolved import in {finding.source}: {finding.message} "
             f"[{finding.code}]. {_evidence_text(finding.evidence)}"
         )
     dependencies = "; ".join(
