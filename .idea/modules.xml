@@ -3,6 +3,7 @@
   <component name="ProjectModuleManager">
     <modules>
       <module fileurl="file://$PROJECT_DIR$/.idea/checksmith.iml" filepath="$PROJECT_DIR$/.idea/checksmith.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../pyarchgraph/.idea/pyarchgraph.iml" filepath="$PROJECT_DIR$/../pyarchgraph/.idea/pyarchgraph.iml" />
     </modules>
   </component>
 </project>
