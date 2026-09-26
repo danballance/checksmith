@@ -236,6 +236,7 @@ def test_a_python_requirement_with_a_version_is_accepted(
         "./local-ruff",
         "git+https://example.com/ruff.git",
         "ruff @ git+https://example.com/ruff.git",
+        "ruff@latest",
         "@scope/name@1.0.0",
         "prettier@3.6.2",
     ],
