@@ -143,9 +143,11 @@ def _collect_output(
             last_output_at = monotonic()
         capture = stdout if event.stream == "stdout" else stderr
         text = capture.consume(event.data)
-        if event.stream == "stderr":
+        if logger.isEnabledFor(logging.DEBUG):
             for line in text.splitlines():
-                logger.debug("%s pid=%d stderr: %s", check_id, process.pid, line)
+                logger.debug(
+                    "%s pid=%d %s: %s", check_id, process.pid, event.stream, line
+                )
 
 
 def run_process(

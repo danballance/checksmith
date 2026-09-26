@@ -145,6 +145,7 @@ def test_process_debug_output_stays_on_stderr(
             "ruff command=",
             "ruff started program=",
             "pid=",
+            "stdout: []",
             "stderr: tool progress",
             "process exited",
             "elapsed=",
@@ -154,6 +155,7 @@ def test_process_debug_output_stays_on_stderr(
             assert message in result.stderr
     else:
         assert result.stderr == ""
+    assert "stdout: []" not in result.stdout
     assert "tool progress" not in result.stdout
     assert "DEBUG" not in result.stdout
     if fmt is OutputFormat.JSON:
