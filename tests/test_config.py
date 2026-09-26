@@ -794,7 +794,7 @@ def test_pyarchgraph_configuration_passes_source_and_rules_unchanged() -> None:
 def test_pyarchgraph_can_run_from_its_pinned_git_source() -> None:
     package = (
         "pyarchgraph @ git+https://github.com/danballance/pyarchgraph"
-        "@f35224ecbb2382b40b9d91c3f79fe35ff12f7d9d"
+        "@3aa103334500ba2f6e31e01c99e650a8efa41de7"
     )
     configured = resolved(
         command="pyarchgraph",

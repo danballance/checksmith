@@ -281,7 +281,7 @@ def test_an_npm_specification_is_not_a_python_requirement(
         uvx_package.validate_package(package="prettier@3.6.2")
 
 
-GIT_COMMIT = "f35224ecbb2382b40b9d91c3f79fe35ff12f7d9d"
+GIT_COMMIT = "3aa103334500ba2f6e31e01c99e650a8efa41de7"
 GIT_REPOSITORY = "git+https://github.com/danballance/pyarchgraph"
 
 

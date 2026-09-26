@@ -59,7 +59,7 @@ checks:
 
   - id: pyarchgraph
     package_type: uvx
-    package: "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@f35224ecbb2382b40b9d91c3f79fe35ff12f7d9d"
+    package: "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main"
     command: pyarchgraph
 
     args:
