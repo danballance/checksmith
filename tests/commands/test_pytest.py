@@ -330,14 +330,3 @@ def test_uv_reports_an_invalid_project_manifest_before_execution(
         PytestCommand().run(check=configured_check, project_root=project_root)
 
     assert processes.started == []
-
-
-def test_prepare_does_not_require_a_uv_project(
-    tmp_path: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-) -> None:
-    result = PytestCommand().prepare(check=configured_check, project_root=tmp_path)
-
-    assert result.status is CheckStatus.SKIPPED
-    assert processes.started == []

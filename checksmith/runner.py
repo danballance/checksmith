@@ -37,34 +37,20 @@ class Runner:
 
     def check(self) -> CheckOutput:
         """Run every check through its command and collect the result."""
-        return self._run(preparing=False)
-
-    def prepare(self) -> CheckOutput:
-        """Prepare configured checks before coding begins."""
-        return self._run(preparing=True)
-
-    def _run(self, preparing: bool) -> CheckOutput:
         if len(self.checks) == 0:
             raise ValueError("a run needs at least one check; none were configured")
-        logger.debug(
-            "%s %d checks", "preparing" if preparing else "running", len(self.checks)
-        )
+        logger.debug("running %d checks", len(self.checks))
         results: list[CheckResult] = []
         for index, check in enumerate(self.checks, start=1):
             logger.debug(
-                "starting %s %d/%d: %s",
-                "preparation" if preparing else "check",
+                "starting check %d/%d: %s",
                 index,
                 len(self.checks),
                 check.id,
             )
             command = self.commands[check.command]
             try:
-                if preparing:
-                    result = command.prepare(
-                        check=check, project_root=self.project_root
-                    )
-                elif command.check_is_runnable(
+                if command.check_is_runnable(
                     check=check, project_root=self.project_root
                 ):
                     result = command.run(check=check, project_root=self.project_root)

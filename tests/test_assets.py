@@ -16,7 +16,8 @@ import yaml
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
 from checksmith.config import Config, ConfigPath
 from checksmith.dtos import CheckStatus, CommandName, PackageType
-from tests.commands.test_pyarchgraph import HEALTHY_REPORT, report_json, stub_analysis
+from tests.commands.test_pyarchgraph import HEALTHY_REPORT
+from tests.conftest import FakeProcesses
 
 
 @pytest.fixture
@@ -30,9 +31,7 @@ def default_assets() -> Iterator[Path]:
 def test_the_starter_directory_ships_four_files(default_assets: Path) -> None:
     """Dot-entries are skipped: Ruff plants a cache beside any config it finds."""
     shipped = sorted(
-        item.name
-        for item in default_assets.iterdir()
-        if not item.name.startswith(".")
+        item.name for item in default_assets.iterdir() if not item.name.startswith(".")
     )
 
     assert shipped == ["checksmith.yaml", "coverage.toml", "ruff.toml", "semgrep.yaml"]
@@ -49,7 +48,11 @@ def test_the_starter_config_loads_through_the_real_loader(
     # ``project_root: ../../..`` resolves against the config directory.
     assert config.project_root == default_assets.parents[2]
     assert tuple(check.id for check in config.checks) == (
-        "ruff", "semgrep", "ty", "pytest", "pyarchgraph"
+        "ruff",
+        "semgrep",
+        "ty",
+        "pytest",
+        "pyarchgraph",
     )
 
 
@@ -151,8 +154,7 @@ def test_the_starter_config_asks_for_the_output_its_command_reads(
     assert "--output-format" in config.checks[2].args
     assert "gitlab" in config.checks[2].args
     assert config.checks[4].command is CommandName.PYARCHGRAPH
-    assert "--output" in config.checks[4].args
-    assert "json" in config.checks[4].args
+    assert config.checks[4].args == (".",)
 
 
 def test_the_starter_config_builds_a_ty_invocation(default_assets: Path) -> None:
@@ -199,7 +201,9 @@ def test_the_starter_config_builds_a_project_pytest_invocation(
     )
 
 
-def test_the_starter_config_builds_a_pyarchgraph_invocation(default_assets: Path) -> None:
+def test_the_starter_config_builds_a_pyarchgraph_invocation(
+    default_assets: Path,
+) -> None:
     config = Config.from_path(
         config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
@@ -210,60 +214,30 @@ def test_the_starter_config_builds_a_pyarchgraph_invocation(default_assets: Path
         "--from",
         (
             "pyarchgraph @ git+https://github.com/danballance/pyarchgraph"
-            "@9d48623d405034f6f32b6eb87f059a2713f1e900"
+            "@f35224ecbb2382b40b9d91c3f79fe35ff12f7d9d"
         ),
         "pyarchgraph",
         ".",
-        "--project-root",
-        ".",
-        "--output",
-        "json",
-        "--output-dir",
-        "build/pyarchgraph",
     )
 
 
-def test_the_starter_pyarchgraph_check_runs_with_and_without_a_baseline(
+def test_the_starter_pyarchgraph_check_reads_stdout(
     default_assets: Path,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    processes: FakeProcesses,
 ) -> None:
     config = Config.from_path(
         config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
     check = config.checks[4]
-    command = PyArchGraphCommand()
-    baseline = tmp_path / "build/pyarchgraph/baseline/dependency-graph.json"
-    current = tmp_path / "build/pyarchgraph/current/dependency-graph.json"
-    calls = stub_analysis(
-        monkeypatch=monkeypatch, report_path=current, content=HEALTHY_REPORT
-    )
+    processes.stdout = HEALTHY_REPORT
 
-    standalone = command.run(check=check, project_root=tmp_path)
+    result = PyArchGraphCommand().run(check=check, project_root=tmp_path)
 
-    assert standalone.status is CheckStatus.PASSED
-    assert not baseline.exists()
-    assert calls[0].arguments == (*check.arguments[:-1], str(current.parent))
-    calls = stub_analysis(
-        monkeypatch=monkeypatch, report_path=baseline, content=HEALTHY_REPORT
-    )
-
-    prepared = command.prepare(check=check, project_root=tmp_path)
-
-    assert prepared.status is CheckStatus.PASSED
-    assert calls[0].arguments == (*check.arguments[:-1], str(baseline.parent))
-    calls = stub_analysis(
-        monkeypatch=monkeypatch,
-        report_path=current,
-        content=report_json(known=1, possible=0),
-    )
-
-    declined = command.run(check=check, project_root=tmp_path)
-
-    assert declined.status is CheckStatus.FAILED
-    assert calls[0].arguments == (*check.arguments[:-1], str(current.parent))
-    assert baseline.read_text(encoding="utf-8") == HEALTHY_REPORT
+    assert result.status is CheckStatus.PASSED
+    assert processes.started[0].argv == check.argv
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_the_starter_checks_choose_their_execution_environments(
@@ -287,9 +261,7 @@ def test_the_starter_ruff_configuration_is_a_standalone_one(
     default_assets: Path,
 ) -> None:
     """A standalone file uses ``[lint]``; ``[tool.ruff.lint]`` is pyproject's."""
-    settings = tomllib.loads(
-        (default_assets / "ruff.toml").read_text(encoding="utf-8")
-    )
+    settings = tomllib.loads((default_assets / "ruff.toml").read_text(encoding="utf-8"))
 
     assert "lint" in settings
     assert "tool" not in settings
@@ -299,9 +271,7 @@ def test_the_starter_ruff_configuration_selects_its_rules_explicitly(
     default_assets: Path,
 ) -> None:
     """An upgrade must not be able to change what this gate enforces."""
-    settings = tomllib.loads(
-        (default_assets / "ruff.toml").read_text(encoding="utf-8")
-    )
+    settings = tomllib.loads((default_assets / "ruff.toml").read_text(encoding="utf-8"))
 
     assert settings["lint"]["select"] != []
     assert settings["target-version"] == "py312"

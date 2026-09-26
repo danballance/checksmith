@@ -401,9 +401,7 @@ def test_pytest_requires_the_uv_project_environment(
 
 
 def test_an_invalid_pytest_package_type_reports_only_the_type() -> None:
-    body = document(
-        checks=[check(package_type="pipx", package=None, command="pytest")]
-    )
+    body = document(checks=[check(package_type="pipx", package=None, command="pytest")])
 
     assert fields_of(reject(body)) == ("checks.0.package_type",)
 
@@ -634,9 +632,7 @@ def test_a_config_path_reaches_the_vector_as_a_plain_string() -> None:
 def test_resolved_arguments_can_be_used_without_the_package_runner() -> None:
     check_ = parse(
         document(
-            checks=[
-                check(args=["--config", {"config_path": "ruff.toml"}, "a path"])
-            ]
+            checks=[check(args=["--config", {"config_path": "ruff.toml"}, "a path"])]
         )
     ).checks[0]
 
@@ -775,53 +771,35 @@ def test_a_ty_check_is_accepted_and_builds_a_uvx_vector() -> None:
     )
 
 
-@pytest.mark.parametrize("directory", ["build/pyarchgraph", "/artifacts/pyarchgraph"])
-def test_pyarchgraph_configuration_passes_its_output_root_to_the_adapter(
-    directory: str,
-) -> None:
+def test_pyarchgraph_configuration_passes_source_and_rules_unchanged() -> None:
     configured = resolved(
         command="pyarchgraph",
-        package="pyarchgraph==0.4.0",
-        args=[
-            "src",
-            "--project-root",
-            ".",
-            "--output",
-            "json",
-            "--output-dir",
-            directory,
-        ],
+        package="pyarchgraph==0.5.0",
+        args=["src", "--exclude", "vendor/*", "--forbid", "app:service"],
     )
-
     assert configured.command is CommandName.PYARCHGRAPH
     assert configured.argv == (
         "uvx",
         "--from",
-        "pyarchgraph==0.4.0",
+        "pyarchgraph==0.5.0",
         "pyarchgraph",
         "src",
-        "--project-root",
-        ".",
-        "--output",
-        "json",
-        "--output-dir",
-        directory,
+        "--exclude",
+        "vendor/*",
+        "--forbid",
+        "app:service",
     )
-
-
-def test_shared_check_configuration_has_no_baseline_setting() -> None:
-    assert "baseline_dir" not in Check.model_fields
 
 
 def test_pyarchgraph_can_run_from_its_pinned_git_source() -> None:
     package = (
         "pyarchgraph @ git+https://github.com/danballance/pyarchgraph"
-        "@9d48623d405034f6f32b6eb87f059a2713f1e900"
+        "@f35224ecbb2382b40b9d91c3f79fe35ff12f7d9d"
     )
     configured = resolved(
         command="pyarchgraph",
         package=package,
-        args=["src", "--output", "json", "--output-dir", "build/pyarchgraph"],
+        args=["src"],
     )
 
     assert configured.argv[:4] == ("uvx", "--from", package, "pyarchgraph")

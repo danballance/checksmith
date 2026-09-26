@@ -198,16 +198,6 @@ def _runner_from_config(config_file: Path, check_id: str | None) -> Runner:
     )
 
 
-@app.command("prepare")
-def prepare(
-    config_file: ConfigOption,
-    fmt: FormatOption = OutputFormat.TEXT,
-    check_id: CheckOption = None,
-) -> None:
-    """Prepare configured checks before coding begins."""
-    _emit(_runner_from_config(config_file=config_file, check_id=check_id).prepare(), fmt)
-
-
 @app.command("check")
 def check(
     config_file: ConfigOption,

@@ -10,7 +10,7 @@ from pathlib import Path
 from stat import S_ISREG
 
 from checksmith.config import Check
-from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
+from checksmith.dtos import CheckResult, CommandName, PackageType
 from checksmith.errors import (
     CheckExecutionError,
     CheckOutputError,
@@ -41,13 +41,6 @@ class Command(ABC):
 
     def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
         return True
-
-    def prepare(self, *, check: Check, project_root: Path) -> CheckResult:
-        return CheckResult(
-            check_id=check.id,
-            status=CheckStatus.SKIPPED,
-            messages=("This command does not require preparation.",),
-        )
 
     def run(self, *, check: Check, project_root: Path) -> CheckResult:
         """Run one check's process and convert what it returned.

@@ -1,7 +1,6 @@
 """Tests for :mod:`checksmith.cli`."""
 
 import json
-import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -35,7 +34,7 @@ from checksmith.errors import CheckOutputError, ConfigSyntaxError
 from checksmith.logs import configure_logging
 from checksmith.outputs.checkoutput import CheckOutput
 from checksmith.packages import UvxPackage
-from tests.commands.test_pyarchgraph import standalone_report_json, write_report
+from tests.commands.test_pyarchgraph import HEALTHY_REPORT, cycle_finding, report_json
 from tests.conftest import FakeProcesses
 
 
@@ -85,7 +84,7 @@ def test_no_arguments_shows_help(cli_runner: CliRunner) -> None:
     assert "Usage" in result.stdout
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 def test_check_requires_a_config_to_be_named(
     cli_runner: CliRunner,
     operation: str,
@@ -259,7 +258,7 @@ def test_selection_preserves_arguments_and_project_root(
     )
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 @pytest.mark.parametrize(
     ("status", "expected_exit_code", "label"),
@@ -308,7 +307,7 @@ def test_only_the_selected_check_runs_its_hooks_and_reports_a_result(
         return expected
 
     monkeypatch.setattr(Command, "check_is_runnable", is_runnable)
-    monkeypatch.setattr(Command, "prepare" if operation == "prepare" else "run", run)
+    monkeypatch.setattr(Command, "run", run)
 
     result = cli_runner.invoke(
         app,
@@ -345,7 +344,7 @@ def forbid_command_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(CommandFactory, "registry", registry)
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 @pytest.mark.parametrize(
     "check_id", ["unknown", "", "LINT-TESTS", "lint", "lint-*", "ruff"]
@@ -379,7 +378,7 @@ def test_an_unknown_check_id_fails_before_execution(
     )
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 @pytest.mark.parametrize("check_id", [None, "lint-tests"])
 @pytest.mark.parametrize(
     ("original", "replacement", "diagnostic"),
@@ -399,12 +398,12 @@ def test_selection_still_validates_the_complete_configuration(
     diagnostic: str,
 ) -> None:
     selection_config_file.write_text(
-        selection_config_file.read_text(encoding="utf-8").replace(original, replacement),
+        selection_config_file.read_text(encoding="utf-8").replace(
+            original, replacement
+        ),
         encoding="utf-8",
     )
-    arguments = [
-        operation, "--config", str(selection_config_file), "--format", "json"
-    ]
+    arguments = [operation, "--config", str(selection_config_file), "--format", "json"]
     if check_id is not None:
         arguments.extend(["--check", check_id])
 
@@ -536,10 +535,13 @@ def pytest_project_root(pytest_config_file: Path) -> Path:
             CheckStatus.FAILED,
             ExitCode.UNHEALTHY,
         ),
-        (1, "Failed to synchronize the environment\n", CheckStatus.ERROR,
-         ExitCode.ERROR),
-        (12, "ImportError while collecting tests\n", CheckStatus.ERROR,
-         ExitCode.ERROR),
+        (
+            1,
+            "Failed to synchronize the environment\n",
+            CheckStatus.ERROR,
+            ExitCode.ERROR,
+        ),
+        (12, "ImportError while collecting tests\n", CheckStatus.ERROR, ExitCode.ERROR),
     ],
 )
 def test_cli_reports_project_pytest_results_and_native_diagnostics(
@@ -566,9 +568,7 @@ def test_cli_reports_project_pytest_results_and_native_diagnostics(
     assert result.stderr == ""
     assert len(processes.started) == 1
     assert processes.started[0].cwd == pytest_project_root
-    assert processes.started[0].argv[:5] == (
-        "uv", "run", "--locked", "python", "-c"
-    )
+    assert processes.started[0].argv[:5] == ("uv", "run", "--locked", "python", "-c")
     assert processes.started[0].argv[-1] == "tests"
     if fmt is OutputFormat.JSON:
         results = json.loads(result.stdout)["results"]
@@ -629,31 +629,6 @@ def test_cli_reports_a_missing_uv_project_as_an_error_even_without_tests(
     else:
         assert "ERROR" in result.stdout
         assert "pyproject.toml" in result.stdout
-
-
-@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
-def test_prepare_skips_pytest_without_loading_its_project_prerequisites(
-    cli_runner: CliRunner,
-    pytest_config_file: Path,
-    processes: FakeProcesses,
-    fmt: OutputFormat,
-) -> None:
-    result = cli_runner.invoke(
-        app,
-        ["prepare", "--config", str(pytest_config_file), "--format", fmt.value],
-    )
-
-    assert result.exit_code == ExitCode.SUCCESS
-    assert result.stderr == ""
-    assert processes.started == []
-    if fmt is OutputFormat.JSON:
-        results = json.loads(result.stdout)["results"]
-        assert results[0]["check_id"] == "unit-tests"
-        assert results[0]["status"] == "skipped"
-        assert results[0]["messages"]
-    else:
-        assert "unit-tests" in result.stdout
-        assert "SKIP" in result.stdout
 
 
 @pytest.fixture
@@ -782,181 +757,110 @@ def pyarchgraph_config_file(tmp_path: Path) -> Path:
         "checks:\n"
         "  - id: architecture\n"
         "    package_type: uvx\n"
-        "    package: pyarchgraph==0.4.0\n"
+        "    package: pyarchgraph==0.5.0\n"
         "    command: pyarchgraph\n"
-        "    args: [src, --project-root, ., --output, json, --output-dir, build]\n",
+        "    args: [src]\n",
         encoding="utf-8",
     )
     return path
 
 
-def stub_pyarchgraph_process(
-    *,
-    monkeypatch: pytest.MonkeyPatch,
-    processes: FakeProcesses,
-    content: str | None,
-) -> None:
-    def run(
-        *,
-        check_id: str,
-        argv: tuple[str, ...],
-        cwd: Path,
-        heartbeat_interval_seconds: float,
-    ) -> subprocess.CompletedProcess[str]:
-        output_dir = Path(argv[argv.index("--output-dir") + 1])
-        if content is not None:
-            write_report(path=output_dir / "dependency-graph.json", content=content)
-        return processes.run(
-            check_id=check_id,
-            argv=argv,
-            cwd=cwd,
-            heartbeat_interval_seconds=heartbeat_interval_seconds,
-        )
-
-    monkeypatch.setattr("checksmith.commands.command.run_process", run)
-
-
 @pytest.mark.parametrize("output_format", ["text", "json"])
 @pytest.mark.parametrize(
-    ("known", "possible", "complete", "tool_exit_code", "exit_code", "status"),
+    ("content", "tool_exit_code", "status", "exit_code"),
     [
-        (0, 0, True, 0, ExitCode.SUCCESS, CheckStatus.PASSED),
-        (2, 0, True, 0, ExitCode.UNHEALTHY, CheckStatus.FAILED),
-        (0, 1, True, 0, ExitCode.UNHEALTHY, CheckStatus.FAILED),
-        (0, 0, False, 0, ExitCode.UNHEALTHY, CheckStatus.FAILED),
-        (0, 0, False, 1, ExitCode.UNHEALTHY, CheckStatus.FAILED),
+        (HEALTHY_REPORT, 0, CheckStatus.PASSED, ExitCode.SUCCESS),
+        (
+            report_json(findings=[cycle_finding("possible")]),
+            1,
+            CheckStatus.FAILED,
+            ExitCode.UNHEALTHY,
+        ),
     ],
 )
-def test_cli_reports_standalone_pyarchgraph_health(
+def test_cli_reports_pyarchgraph_findings(
     cli_runner: CliRunner,
     pyarchgraph_config_file: Path,
     processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
     output_format: str,
-    known: int,
-    possible: int,
-    complete: bool,
+    content: str,
     tool_exit_code: int,
-    exit_code: ExitCode,
     status: CheckStatus,
+    exit_code: ExitCode,
 ) -> None:
-    content = standalone_report_json(
-        known=known,
-        possible=possible,
-        complete=complete,
-        scope_valid=True,
-        dependency_resolution_complete=True,
-        nonempty=True,
-    )
     processes.exit_code = tool_exit_code
-    stub_pyarchgraph_process(
-        monkeypatch=monkeypatch, processes=processes, content=content
-    )
-
+    processes.stdout = content
     result = cli_runner.invoke(
         app,
-        [
-            "check",
-            "--config",
-            str(pyarchgraph_config_file),
-            "--format",
-            output_format,
-        ],
+        ["check", "--config", str(pyarchgraph_config_file), "--format", output_format],
     )
 
     assert result.exit_code == exit_code, result.stdout
     assert result.stderr == ""
     root = pyarchgraph_config_file.parent
-    current = root / "build/current/dependency-graph.json"
-    assert current.read_text(encoding="utf-8") == content
-    assert not (root / "build/baseline/dependency-graph.json").exists()
+    assert not (root / "build").exists()
     assert processes.started[0].cwd == root
     assert processes.started[0].argv == (
         "uvx",
         "--from",
-        "pyarchgraph==0.4.0",
+        "pyarchgraph==0.5.0",
         "pyarchgraph",
         "src",
-        "--project-root",
-        ".",
-        "--output",
-        "json",
-        "--output-dir",
-        str(current.parent),
     )
     if output_format == "json":
-        payload = json.loads(result.stdout)
-        assert set(payload) == {"results"}
-        assert len(payload["results"]) == 1
-        assert set(payload["results"][0]) == {"check_id", "status", "messages"}
         output = CheckOutput.model_validate_json(result.stdout)
         assert output.results[0].check_id == "architecture"
         assert output.results[0].status is status
-        messages = "\n".join(output.results[0].messages)
-        assert "baseline" in messages.lower()
-        assert "standalone" in messages.lower()
-        assert str(current) in messages
-        assert "coverage" in messages.lower()
+        assert output.results[0].messages[0] == "Modules: 2; dependencies: 2."
     else:
         assert "architecture" in result.stdout
         assert ("PASS" if status is CheckStatus.PASSED else "FAIL") in result.stdout
-        assert "baseline" in result.stdout.lower()
 
 
 @pytest.mark.parametrize("output_format", ["text", "json"])
 @pytest.mark.parametrize(
     ("content", "tool_exit_code", "stderr", "message"),
     [
-        ("not json", 0, "", "Cannot read PyArchGraph report"),
-        (None, 2, "Cannot analyze src", "pyarchgraph exited 2"),
+        ("not json", 0, "", "Invalid PyArchGraph report"),
+        ("", 2, "Cannot analyze src", "pyarchgraph exited 2"),
+        (HEALTHY_REPORT, 1, "", "exit code disagrees"),
     ],
 )
-def test_cli_reports_standalone_pyarchgraph_errors(
+def test_cli_reports_pyarchgraph_errors(
     cli_runner: CliRunner,
     pyarchgraph_config_file: Path,
     processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
     output_format: str,
-    content: str | None,
+    content: str,
     tool_exit_code: int,
     stderr: str,
     message: str,
 ) -> None:
     processes.exit_code = tool_exit_code
     processes.stderr = stderr
-    stub_pyarchgraph_process(
-        monkeypatch=monkeypatch, processes=processes, content=content
-    )
-
+    processes.stdout = content
     result = cli_runner.invoke(
         app,
-        [
-            "check",
-            "--config",
-            str(pyarchgraph_config_file),
-            "--format",
-            output_format,
-        ],
+        ["check", "--config", str(pyarchgraph_config_file), "--format", output_format],
     )
 
     assert result.exit_code == ExitCode.ERROR
     assert result.stderr == ""
-    assert not (
-        pyarchgraph_config_file.parent / "build/baseline/dependency-graph.json"
-    ).exists()
     if output_format == "json":
         output = CheckOutput.model_validate_json(result.stdout)
-        assert len(output.results) == 1
-        assert output.results[0].check_id == "architecture"
         assert output.results[0].status is CheckStatus.ERROR
         messages = "\n".join(output.results[0].messages)
         assert message in messages
-        if stderr:
-            assert stderr in messages
+        assert stderr in messages
     else:
         assert "architecture" in result.stdout
         assert "ERROR" in result.stdout
-        assert "PyArchGraph" in result.stdout or "pyarchgraph" in result.stdout
+
+
+def test_prepare_is_no_longer_a_command(cli_runner: CliRunner) -> None:
+    result = cli_runner.invoke(app, ["prepare"])
+    assert result.exit_code == ExitCode.ERROR
+    assert "No such command" in result.stderr
 
 
 @pytest.fixture
@@ -1055,7 +959,9 @@ def test_cli_reports_ty_errors_and_warnings_as_unhealthy(
     }
 
 
-@pytest.mark.parametrize("stdout", ["not json", '[{"description": "Missing location"}]'])
+@pytest.mark.parametrize(
+    "stdout", ["not json", '[{"description": "Missing location"}]']
+)
 def test_cli_reports_malformed_ty_output_as_an_error(
     cli_runner: CliRunner,
     ty_config_file: Path,
@@ -1269,37 +1175,6 @@ def test_cli_reports_malformed_import_linter_toml_as_an_error(
         assert "Expected ']'" in result.stdout
 
 
-@pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
-def test_prepare_skips_normal_checks_without_loading_their_prerequisites(
-    cli_runner: CliRunner,
-    import_linter_config_file: Path,
-    processes: FakeProcesses,
-    fmt: OutputFormat,
-) -> None:
-    (import_linter_config_file.parent / "pyproject.toml").write_text(
-        "[tool.importlinter\n",
-        encoding="utf-8",
-    )
-
-    result = cli_runner.invoke(
-        app,
-        ["prepare", "--config", str(import_linter_config_file), "--format", fmt.value],
-    )
-
-    assert result.exit_code == ExitCode.SUCCESS
-    assert result.stderr == ""
-    assert processes.started == []
-    if fmt is OutputFormat.JSON:
-        results = json.loads(result.stdout)["results"]
-        assert len(results) == 1
-        assert results[0]["check_id"] == "dependencies"
-        assert results[0]["status"] == "skipped"
-        assert results[0]["messages"]
-    else:
-        assert "dependencies" in result.stdout
-        assert "SKIP" in result.stdout
-
-
 @pytest.mark.parametrize(
     ("pyproject", "first_status", "expected_exit_code"),
     [
@@ -1343,7 +1218,7 @@ def test_cli_still_runs_later_checks_after_an_import_linter_prerequisite_result(
     assert [entry["status"] for entry in results] == [first_status, "passed"]
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 def test_cli_reports_every_check_after_an_individual_tool_error(
     cli_runner: CliRunner,
@@ -1401,7 +1276,7 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
             raise outcome
         return outcome
 
-    monkeypatch.setattr(Command, "prepare" if operation == "prepare" else "run", run)
+    monkeypatch.setattr(Command, "run", run)
 
     result = cli_runner.invoke(
         app,
@@ -1456,7 +1331,7 @@ def test_an_unexpected_tool_adapter_bug_reaches_the_cli_error_boundary(
     assert "general error: RuntimeError: adapter bug" in result.stderr
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 def test_check_reports_a_bad_config_option_without_typers_wording(
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -1542,7 +1417,7 @@ def test_emit_exits_with_the_code_its_output_implies(
     assert raised.value.exit_code == ExitCode.UNHEALTHY
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 def test_check_rejects_an_unknown_format(
     cli_runner: CliRunner,
     operation: str,
@@ -1638,21 +1513,23 @@ def test_output_format_values_match_the_cli_schema() -> None:
 CLI_SCHEMA_PATH = Path(__file__).parent.parent / "checksmith-cli.yaml"
 
 
-@pytest.mark.parametrize("operation", ["check", "prepare"])
+@pytest.mark.parametrize("operation", ["check"])
 def test_check_selector_matches_the_cli_schema_and_appears_in_help(
     cli_runner: CliRunner,
     operation: str,
 ) -> None:
     schema = yaml.safe_load(CLI_SCHEMA_PATH.read_text(encoding="utf-8"))
     command = next(
-        entry for entry in schema["command"]["commands"]
-        if entry["name"] == operation
+        entry for entry in schema["command"]["commands"] if entry["name"] == operation
     )
-    declared = next(option for option in command["options"] if option["name"] == "--check")
+    declared = next(
+        option for option in command["options"] if option["name"] == "--check"
+    )
     root = typer.main.get_command(app)
     assert isinstance(root, TyperGroup)
     option = next(
-        parameter for parameter in root.commands[operation].params
+        parameter
+        for parameter in root.commands[operation].params
         if parameter.name == "check_id"
     )
 
@@ -1715,7 +1592,6 @@ def test_command_names_match_the_cli_schema() -> None:
         ("agents", "uninstall"),
         ("check",),
         ("init",),
-        ("prepare",),
     }
 
 

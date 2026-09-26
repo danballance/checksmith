@@ -117,22 +117,6 @@ def test_a_command_is_runnable_without_overriding_the_hook(
     assert command.read == []
 
 
-def test_preparation_skips_commands_without_a_preparation_step(
-    processes: FakeProcesses,
-) -> None:
-    command = RecordingCommand()
-
-    result = command.prepare(
-        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT
-    )
-
-    assert result.check_id == "lint"
-    assert result.status is CheckStatus.SKIPPED
-    assert "does not require preparation" in result.messages[0]
-    assert processes.started == []
-    assert command.read == []
-
-
 # Starting the process
 
 
