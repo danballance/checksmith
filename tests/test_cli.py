@@ -22,7 +22,7 @@ from checksmith.cli import (
 )
 from checksmith.commands.command import Command
 from checksmith.commands.registry import CommandFactory
-from checksmith.config import Check
+from checksmith.config import Check, Config
 from checksmith.dtos import (
     CheckResult,
     CheckStatus,
@@ -82,6 +82,157 @@ def test_no_arguments_shows_help(cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(app, [])
 
     assert "Usage" in result.stdout
+
+
+def test_init_prompts_with_the_current_directory_and_accepts_enter(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "300")
+
+    result = cli_runner.invoke(app, ["init"], input="\n")
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert f"Project root [{tmp_path}]" in result.stdout
+    assert {path.name for path in tmp_path.iterdir()} == {
+        "checksmith.yaml",
+        "ruff.toml",
+        "semgrep.yaml",
+        "coverage.toml",
+    }
+    assert all(
+        filename in result.stdout
+        for filename in ("checksmith.yaml", "ruff.toml", "semgrep.yaml", "coverage.toml")
+    )
+    config_path = tmp_path / "checksmith.yaml"
+    assert yaml.safe_load(config_path.read_text())["project_root"] == "."
+    assert (
+        Config.from_path(config_file=config_path, working_directory=tmp_path).project_root
+        == tmp_path
+    )
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+@pytest.mark.parametrize("prompt", [False, True])
+def test_init_selects_another_project_root_and_writes_in_the_current_directory(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absolute: bool,
+    prompt: bool,
+) -> None:
+    destination = tmp_path / "configuration"
+    destination.mkdir()
+    project_root = tmp_path / "my project: 'one' #two"
+    project_root.mkdir()
+    monkeypatch.chdir(destination)
+    selected_root = str(project_root) if absolute else f"../{project_root.name}"
+    arguments = ["init"] if prompt else ["init", "--project-root", selected_root]
+
+    result = cli_runner.invoke(
+        app,
+        arguments,
+        input=f"{selected_root}\n" if prompt else None,
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert (f"Project root [{destination}]" in result.stdout) is prompt
+    config_path = destination / "checksmith.yaml"
+    assert yaml.safe_load(config_path.read_text())["project_root"] == (
+        f"../{project_root.name}"
+    )
+    config = Config.from_path(config_file=config_path, working_directory=destination)
+    assert config.project_root == project_root
+    assert list(project_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("root_kind", ["missing", "file"])
+@pytest.mark.parametrize("prompt", [False, True])
+def test_init_reports_invalid_roots_without_retrying_or_creating_files(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_kind: str,
+    prompt: bool,
+) -> None:
+    project_root = tmp_path / root_kind
+    if root_kind == "file":
+        project_root.touch()
+    before = set(tmp_path.iterdir())
+    monkeypatch.chdir(tmp_path)
+    arguments = ["init"] if prompt else ["init", "--project-root", str(project_root)]
+
+    result = cli_runner.invoke(
+        app,
+        arguments,
+        input=f"{project_root}\n" if prompt else None,
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr.startswith("checksmith error:")
+    assert str(project_root) in result.stderr
+    assert result.stdout.count(f"Project root [{tmp_path}]") == int(prompt)
+    assert set(tmp_path.iterdir()) == before
+
+
+def test_init_refuses_collisions_without_creating_other_files(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing_file = tmp_path / "ruff.toml"
+    existing_file.write_text("existing configuration", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = cli_runner.invoke(app, ["init", "--project-root", "."])
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stdout == ""
+    assert result.stderr.startswith("checksmith error:")
+    assert "ruff.toml" in result.stderr
+    assert existing_file.read_text(encoding="utf-8") == "existing configuration"
+    assert list(tmp_path.iterdir()) == [existing_file]
+
+
+def test_init_aborts_on_end_of_input_without_creating_files(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = cli_runner.invoke(app, ["init"], input="")
+
+    assert result.exit_code == ExitCode.UNHEALTHY
+    assert "Aborted" in result.stderr
+    assert "checksmith error:" not in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_init_aborts_on_keyboard_interrupt_without_creating_files(
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def interrupt(prompt: str) -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.chdir(tmp_path)
+
+    with cli_runner.isolation() as (_, stderr, _), monkeypatch.context() as prompt_patch:
+        prompt_patch.setattr("click.termui.visible_prompt_func", interrupt)
+
+        with pytest.raises(SystemExit) as raised:
+            typer.main.get_command(app).main(["init"])
+
+        assert raised.value.code == ExitCode.UNHEALTHY
+        assert "Aborted" in stderr.getvalue().decode("utf-8")
+        assert "checksmith error:" not in stderr.getvalue().decode("utf-8")
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("operation", ["check"])
@@ -1431,7 +1582,7 @@ def test_check_rejects_an_unknown_format(
 
 @pytest.mark.parametrize(
     "command",
-    [["agents", "install"], ["agents", "uninstall"], ["init"]],
+    [["agents", "install"], ["agents", "uninstall"]],
 )
 def test_unimplemented_commands_fail_loudly(
     cli_runner: CliRunner,
@@ -1513,6 +1664,41 @@ def test_output_format_values_match_the_cli_schema() -> None:
 
 
 CLI_SCHEMA_PATH = Path(__file__).parent.parent / "checksmith-cli.yaml"
+
+
+def test_init_root_option_matches_the_cli_schema_and_appears_in_help(
+    cli_runner: CliRunner,
+) -> None:
+    schema = yaml.safe_load(CLI_SCHEMA_PATH.read_text(encoding="utf-8"))
+    command = next(
+        entry for entry in schema["command"]["commands"] if entry["name"] == "init"
+    )
+    declared = next(
+        option for option in command["options"] if option["name"] == "--project-root"
+    )
+    root = typer.main.get_command(app)
+    assert isinstance(root, TyperGroup)
+    option = next(
+        parameter
+        for parameter in root.commands["init"].params
+        if parameter.name == "project_root"
+    )
+
+    assert command["interactive"] is True
+    assert isinstance(option, TyperOption)
+    assert option.opts == [declared["name"]]
+    assert option.required is declared["required"] is False
+    assert option.nargs == len(declared["arguments"]) == 1
+    assert declared["arguments"][0]["required"] is True
+    assert all(parameter.name != "fmt" for parameter in root.commands["init"].params)
+    assert all(option["name"] != "--format" for option in command["options"])
+
+    result = cli_runner.invoke(app, ["init", "--help"])
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert "--project-root" in result.stdout
+    assert "--format" not in result.stdout
+    assert "current directory" in result.stdout
 
 
 @pytest.mark.parametrize("operation", ["check"])

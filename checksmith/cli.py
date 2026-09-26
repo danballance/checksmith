@@ -2,6 +2,7 @@
 
 import logging
 from enum import StrEnum
+from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Any, Final, NoReturn
 
@@ -14,6 +15,12 @@ from checksmith.commands.registry import CommandFactory
 from checksmith.config import Config
 from checksmith.dtos import ExitCode
 from checksmith.errors import ChecksmithError
+from checksmith.initialization import (
+    Initializer,
+    LocalInitializationFilesystem,
+    PackagedAssetSource,
+    YamlConfigRenderer,
+)
 from checksmith.logs import configure_logging
 from checksmith.outputs.base import CliOutput
 from checksmith.runner import Runner
@@ -53,6 +60,18 @@ CheckOption = Annotated[
         "--check",
         metavar="ID",
         help="Select one configured check by its exact ID; omit to select all.",
+    ),
+]
+
+ProjectRootOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--project-root",
+        metavar="PATH",
+        help=(
+            "Existing project directory; relative paths resolve from the current "
+            "directory. Omit to confirm the project root interactively."
+        ),
     ),
 ]
 
@@ -170,12 +189,23 @@ def agents_uninstall() -> None:
 
 
 @app.command("init")
-def init() -> None:
-    """Create the project's Checksmith YAML configuration.
+def init(project_root: ProjectRootOption = None) -> None:
+    """Create the bundled configuration files in the current directory.
 
     Operation id: ``init``. Output kind: ``Init``.
     """
-    raise NotImplementedError
+    destination = Path.cwd()
+    if project_root is None:
+        project_root = Path(typer.prompt("Project root", default=str(destination)))
+    initializer = Initializer(
+        assets=PackagedAssetSource(directory=files("checksmith") / "assets" / "default"),
+        renderer=YamlConfigRenderer(),
+        filesystem=LocalInitializationFilesystem(),
+    )
+    _emit(
+        initializer.initialize(destination=destination, project_root=project_root),
+        OutputFormat.TEXT,
+    )
 
 
 def _runner_from_config(config_file: Path, check_id: str | None) -> Runner:

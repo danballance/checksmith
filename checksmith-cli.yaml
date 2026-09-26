@@ -74,8 +74,20 @@ command:
             - checksmith agents uninstall
 
     - name: init
-      description: Create the project's Checksmith YAML configuration.
-      interactive: false
+      description: >-
+        Create the bundled configuration files in the current directory. Confirm
+        the project root interactively unless --project-root is provided.
+      interactive: true
+      options:
+        - name: --project-root
+          required: false
+          description: >-
+            Select an existing project directory without prompting. A relative
+            path resolves from the current directory. Omit to confirm the
+            current directory or enter another project root interactively.
+          arguments:
+            - name: path
+              required: true
       metadata:
         - name: checksmith.operation
           value:
@@ -85,6 +97,7 @@ command:
             kind: Init
       examples:
         - checksmith init
+        - checksmith init --project-root ..
 
     - name: check
       description: Execute the project's configured checks and report their results.
