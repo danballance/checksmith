@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Final, Self, cast
 
-import yaml
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -20,7 +19,6 @@ from pydantic import (
 from checksmith.dtos import CommandName, PackageType
 from checksmith.errors import (
     ConfigSchemaError,
-    ConfigSyntaxError,
     SchemaViolation,
 )
 from checksmith.packages import Package
@@ -191,48 +189,6 @@ class Config(BaseModel):
                 raise ValueError(f"duplicate check ID {check.id!r}; IDs must be unique")
             seen.add(check.id)
         return value
-
-    @staticmethod
-    def _read(*, path: Path) -> Mapping[object, object]:
-        """Read one config file as plain data, or fail with what went wrong.
-
-        PyYAML is handed the stream and not its text, so the positions in its own
-        messages name this file rather than ``<unicode string>``.
-        """
-        try:
-            with path.open(encoding="utf-8") as stream:
-                document = yaml.safe_load(stream)
-        except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
-            raise ConfigSyntaxError(config_file=path, problem=str(error)) from error
-        if not isinstance(document, Mapping):
-            # An empty file parses to ``None``, which lands here too.
-            raise ConfigSyntaxError(
-                config_file=path,
-                problem=(
-                    f'expected a mapping at the top level in "{path}", '
-                    f"found {type(document).__name__}"
-                ),
-            )
-        logger.debug(
-            "read %s: top-level keys %s",
-            path,
-            sorted(str(key) for key in document),
-        )
-        return document
-
-    @classmethod
-    def from_path(cls, *, config_file: Path, working_directory: Path) -> Self:
-        """Turn a ``--config`` argument into a configuration, or fail saying why.
-
-        Two base directories are in play and are not interchangeable: the
-        caller's, which ``--config`` resolves against, and the config file's
-        own, which everything inside the file resolves against.
-        """
-        base_directory = working_directory
-        value = str(config_file)
-        path = Path(os.path.normpath(base_directory / value))
-        logger.debug("resolving %s against %s -> %s", value, base_directory, path)
-        return cls.from_mapping(document=cls._read(path=path), config_file=path)
 
     @classmethod
     def from_mapping(

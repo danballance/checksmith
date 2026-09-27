@@ -23,9 +23,7 @@ class ImportEvidence(ReportModel):
     line: PositiveCount
     column: PositiveCount
     source_segment: str | None
-    resolution_kind: (
-        Literal["exact_module", "exact_base", "probable_submodule"] | None
-    )
+    resolution_kind: Literal["exact_module", "exact_base", "probable_submodule"] | None
 
 
 class Dependency(ReportModel):
@@ -71,47 +69,6 @@ class PyArchGraphReport(ReportModel):
     findings: tuple[Finding, ...]
 
 
-def _evidence_text(evidence: tuple[ImportEvidence, ...]) -> str:
-    return "; ".join(
-        f"{item.path}:{item.line}:{item.column}"
-        + (f" ({item.source_segment})" if item.source_segment else "")
-        for item in evidence
-    )
-
-
-def _finding_message(finding: Finding) -> str:
-    if isinstance(finding, ImportFinding):
-        return (
-            f"Unresolved import in {finding.source}: {finding.message} "
-            f"[{finding.code}]. {_evidence_text(finding.evidence)}"
-        )
-    dependencies = "; ".join(
-        f"{edge.source} -> {edge.target} at {_evidence_text(edge.evidence)}"
-        for edge in finding.witness
-    )
-    if isinstance(finding, CycleFinding):
-        if finding.definite_members:
-            summary = f"Definite cyclic modules: {', '.join(finding.definite_members)}."
-            possible_members = tuple(
-                member
-                for member in finding.members
-                if member not in finding.definite_members
-            )
-            if possible_members:
-                summary += (
-                    " Other component members with possible cycle involvement: "
-                    f"{', '.join(possible_members)}."
-                )
-        else:
-            summary = f"Possible dependency cycle among {', '.join(finding.members)}."
-        return f"{summary} Witness: {dependencies}"
-    rules = ", ".join(f"{source}:{target}" for source, target in finding.rules)
-    return (
-        f"{finding.certainty.capitalize()} forbidden dependency "
-        f"(rules: {rules}). {dependencies}"
-    )
-
-
 class PyArchGraphCommand(Command):
     @property
     def name(self) -> CommandName:
@@ -155,6 +112,49 @@ class PyArchGraphCommand(Command):
             status=CheckStatus.FAILED if failed else CheckStatus.PASSED,
             messages=(
                 f"Modules: {report.module_count}; dependencies: {report.dependency_count}.",
-                *(_finding_message(finding) for finding in report.findings),
+                *(self._finding_message(finding) for finding in report.findings),
             ),
+        )
+
+    def _evidence_text(self, evidence: tuple[ImportEvidence, ...]) -> str:
+        return "; ".join(
+            f"{item.path}:{item.line}:{item.column}"
+            + (f" ({item.source_segment})" if item.source_segment else "")
+            for item in evidence
+        )
+
+    def _finding_message(self, finding: Finding) -> str:
+        if isinstance(finding, ImportFinding):
+            return (
+                f"Unresolved import in {finding.source}: {finding.message} "
+                f"[{finding.code}]. {self._evidence_text(finding.evidence)}"
+            )
+        dependencies = "; ".join(
+            f"{edge.source} -> {edge.target} at {self._evidence_text(edge.evidence)}"
+            for edge in finding.witness
+        )
+        if isinstance(finding, CycleFinding):
+            if finding.definite_members:
+                summary = (
+                    f"Definite cyclic modules: {', '.join(finding.definite_members)}."
+                )
+                possible_members = tuple(
+                    member
+                    for member in finding.members
+                    if member not in finding.definite_members
+                )
+                if possible_members:
+                    summary += (
+                        " Other component members with possible cycle involvement: "
+                        f"{', '.join(possible_members)}."
+                    )
+            else:
+                summary = (
+                    f"Possible dependency cycle among {', '.join(finding.members)}."
+                )
+            return f"{summary} Witness: {dependencies}"
+        rules = ", ".join(f"{source}:{target}" for source, target in finding.rules)
+        return (
+            f"{finding.certainty.capitalize()} forbidden dependency "
+            f"(rules: {rules}). {dependencies}"
         )

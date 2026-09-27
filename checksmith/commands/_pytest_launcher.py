@@ -2,7 +2,7 @@ import os
 import stat
 import sys
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, TextIO, cast
 
 import pytest
 
@@ -67,39 +67,56 @@ class _ChecksmithPlugin:
             cast(_CoveragePlugin, coverage_plugin).options.cov_fail_under = 0.0
 
 
-def _coverage_config_arguments(*, arguments: list[str]) -> list[str]:
-    normalized: list[str] = []
-    index = 0
-    while index < len(arguments):
-        option = arguments[index]
-        if option == "--":
-            normalized.extend(arguments[index:])
-            break
-        if (
-            option == "--cov-config"
-            and index + 1 < len(arguments)
-            and not arguments[index + 1].startswith("-")
-        ):
-            normalized.append(f"{option}={arguments[index + 1]}")
-            index += 2
-        else:
-            normalized.append(option)
-            index += 1
-    return normalized
+class PytestInvocation(Protocol):
+    def __call__(self, args: list[str], plugins: list[object]) -> int: ...
 
 
-def main(*, args: list[str]) -> int:
-    plugin = _ChecksmithPlugin()
-    exit_code = int(
-        pytest.main(_coverage_config_arguments(arguments=args), plugins=[plugin])
-    )
-    if exit_code not in range(7):
-        print(f"pytest returned an unexpected exit code: {exit_code}", file=sys.stderr)
-        return 2
-    if plugin.collection_failed:
-        return EXIT_CODE_OFFSET + pytest.ExitCode.INTERRUPTED
-    return EXIT_CODE_OFFSET + exit_code
+class PytestLauncher:
+    def __init__(self, invoke_pytest: PytestInvocation, error_stream: TextIO) -> None:
+        self._invoke_pytest = invoke_pytest
+        self._error_stream = error_stream
+
+    def run(self, *, args: list[str]) -> int:
+        plugin = _ChecksmithPlugin()
+        exit_code = int(
+            self._invoke_pytest(
+                self._coverage_config_arguments(arguments=args), plugins=[plugin]
+            )
+        )
+        if exit_code not in range(7):
+            print(
+                f"pytest returned an unexpected exit code: {exit_code}",
+                file=self._error_stream,
+            )
+            return 2
+        if plugin.collection_failed:
+            return EXIT_CODE_OFFSET + pytest.ExitCode.INTERRUPTED
+        return EXIT_CODE_OFFSET + exit_code
+
+    def _coverage_config_arguments(self, *, arguments: list[str]) -> list[str]:
+        normalized: list[str] = []
+        index = 0
+        while index < len(arguments):
+            option = arguments[index]
+            if option == "--":
+                normalized.extend(arguments[index:])
+                break
+            if (
+                option == "--cov-config"
+                and index + 1 < len(arguments)
+                and not arguments[index + 1].startswith("-")
+            ):
+                normalized.append(f"{option}={arguments[index + 1]}")
+                index += 2
+            else:
+                normalized.append(option)
+                index += 1
+        return normalized
 
 
 if __name__ == "__main__":
-    sys.exit(main(args=sys.argv[1:]))
+    sys.exit(
+        PytestLauncher(invoke_pytest=pytest.main, error_stream=sys.stderr).run(
+            args=sys.argv[1:]
+        )
+    )

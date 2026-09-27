@@ -6,10 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from checksmith.commands.pytest import PytestCommand
 from checksmith.config import Check
 from checksmith.dtos import CheckStatus, CommandName, PackageType
+from checksmith.processes import LocalProcessRuntime, SubprocessExecutor
 from checksmith.runner import Runner
+from tests.conftest import make_command_factory
 
 
 @pytest.fixture
@@ -82,8 +83,7 @@ def test_real_uv_setup_errors_cannot_pass_an_absent_test_suite(
         project_file.write_text("[project\n", encoding="utf-8")
     elif problem == "unmanaged_project":
         project_file.write_text(
-            project_file.read_text(encoding="utf-8")
-            + "\n[tool.uv]\nmanaged = false\n",
+            project_file.read_text(encoding="utf-8") + "\n[tool.uv]\nmanaged = false\n",
             encoding="utf-8",
         )
 
@@ -94,9 +94,12 @@ def test_real_uv_setup_errors_cannot_pass_an_absent_test_suite(
         command=CommandName.PYTEST,
         args=("tests",),
     )
+    command_factory = make_command_factory(
+        executor=SubprocessExecutor(runtime=LocalProcessRuntime())
+    )
     output = Runner(
         checks=(check,),
-        commands={CommandName.PYTEST: PytestCommand()},
+        commands=command_factory.registry(),
         project_root=project,
     ).check()
 

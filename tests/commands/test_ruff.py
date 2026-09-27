@@ -6,11 +6,11 @@ from typing import Final
 
 import pytest
 
-from checksmith.commands.ruff import RuffCommand
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError
-from tests.conftest import FakeProcesses
+from tests.conftest import FakeProcesses, make_command_factory
 
 PROJECT_ROOT = Path("/workspace/project")
 
@@ -41,9 +41,10 @@ def ruff_check(*, check_id: str) -> Check:
 
 def test_a_failed_run_names_the_check_it_was_given_rather_than_the_command(
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     """One command serves many checks, so only the argument can say which failed."""
-    command = RuffCommand()
+    command = command_factory.for_name(name=CommandName.RUFF)
 
     with pytest.raises(CheckOutputError) as raised:
         command.run(check=ruff_check(check_id="second-lint"), project_root=PROJECT_ROOT)
@@ -53,14 +54,17 @@ def test_a_failed_run_names_the_check_it_was_given_rather_than_the_command(
 
 def test_a_clean_run_of_the_real_ruff_command_passes(
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     """Start to finish through the shipped command: a project with nothing wrong."""
     processes.stdout = "[]"
-    command = RuffCommand()
+    command = command_factory.for_name(name=CommandName.RUFF)
 
     result = command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
 
-    assert result == CheckResult(check_id="lint", status=CheckStatus.PASSED, messages=())
+    assert result == CheckResult(
+        check_id="lint", status=CheckStatus.PASSED, messages=()
+    )
 
 
 # Reading ruff's JSON
@@ -123,12 +127,16 @@ Found 1 error.
 
 def read_ruff(*, stdout: str, exit_code: int, stderr: str) -> CheckResult:
     """Hand one ruff report to the adapter, exactly as ``run`` would."""
-    return RuffCommand().process_response(
-        check_id="lint",
-        project_root=PROJECT_ROOT,
-        exit_code=exit_code,
-        stdout=stdout,
-        stderr=stderr,
+    return (
+        make_command_factory(executor=FakeProcesses())
+        .for_name(name=CommandName.RUFF)
+        .process_response(
+            check_id="lint",
+            project_root=PROJECT_ROOT,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
     )
 
 
@@ -153,7 +161,10 @@ def test_each_diagnostic_becomes_a_finding_against_the_project_root() -> None:
 
 def test_a_report_with_diagnostics_is_a_failing_check() -> None:
     """The findings are the report, so having any of them is the failure."""
-    assert read_ruff(stdout=RUFF_REPORT, exit_code=1, stderr="").status is CheckStatus.FAILED
+    assert (
+        read_ruff(stdout=RUFF_REPORT, exit_code=1, stderr="").status
+        is CheckStatus.FAILED
+    )
 
 
 def test_a_diagnostic_that_names_no_rule_omits_the_code() -> None:
@@ -225,9 +236,7 @@ def test_a_file_outside_the_project_root_still_reads_as_a_path() -> None:
 
     result = read_ruff(stdout=stdout, exit_code=1, stderr="")
 
-    assert result.messages == (
-        "../elsewhere/app.py:1:8 F401 `os` imported but unused",
-    )
+    assert result.messages == ("../elsewhere/app.py:1:8 F401 `os` imported but unused",)
 
 
 def test_ruff_failing_is_not_reported_as_a_coding_standard_violation() -> None:

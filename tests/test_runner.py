@@ -23,7 +23,7 @@ from checksmith.errors import (
     CheckPrerequisiteError,
 )
 from checksmith.runner import Runner
-from tests.conftest import FakeProcesses
+from tests.conftest import FakeProcesses, make_command_factory
 
 PROJECT_ROOT = Path("/workspace/project")
 
@@ -106,6 +106,29 @@ class EligibilityCommand(RecordingCommand):
         return super().run(check=check, project_root=project_root)
 
 
+class ReportProcesses(FakeProcesses):
+    def run(
+        self,
+        *,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        reports = {
+            "ruff": "[]",
+            "semgrep": '{"results": [], "errors": []}',
+            "ty": "[]",
+        }
+        self.stdout = reports[argv[3]]
+        return super().run(
+            check_id=check_id,
+            argv=argv,
+            cwd=cwd,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+
+
 def ruff_check(*, check_id: str) -> Check:
     return Check(
         id=check_id,
@@ -122,8 +145,10 @@ def checks() -> tuple[Check, ...]:
     return (ruff_check(check_id="lint"), ruff_check(check_id="format"))
 
 
-def test_runner_retains_what_it_was_given(checks: tuple[Check, ...]) -> None:
-    commands = CommandFactory.registry()
+def test_runner_retains_what_it_was_given(
+    checks: tuple[Check, ...], command_factory: CommandFactory
+) -> None:
+    commands = command_factory.registry()
 
     runner = Runner(checks=checks, commands=commands, project_root=PROJECT_ROOT)
 
@@ -210,10 +235,11 @@ def test_every_check_runs_in_the_one_project_root(
 def test_unreadable_tool_reports_are_collected_for_every_check(
     checks: tuple[Check, ...],
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     output = Runner(
         checks=checks,
-        commands=CommandFactory.registry(),
+        commands=command_factory.registry(),
         project_root=PROJECT_ROOT,
     ).check()
 
@@ -229,13 +255,14 @@ def test_unreadable_tool_reports_are_collected_for_every_check(
 def test_a_whole_suite_runs_through_the_commands_checksmith_ships(
     checks: tuple[Check, ...],
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     """Two real checks, read by the real command, over a project with nothing wrong."""
     processes.stdout = "[]"
 
     output = Runner(
         checks=checks,
-        commands=CommandFactory.registry(),
+        commands=command_factory.registry(),
         project_root=PROJECT_ROOT,
     ).check()
 
@@ -247,20 +274,21 @@ def test_a_whole_suite_runs_through_the_commands_checksmith_ships(
     assert output.exit_code is ExitCode.SUCCESS
 
 
-def test_a_run_with_no_checks_at_all_is_rejected() -> None:
+def test_a_run_with_no_checks_at_all_is_rejected(
+    command_factory: CommandFactory,
+) -> None:
     """The schema forbids an empty suite, so reaching here is a caller's bug."""
     with pytest.raises(ValueError, match="at least one check"):
         Runner(
             checks=(),
-            commands=CommandFactory.registry(),
+            commands=command_factory.registry(),
             project_root=PROJECT_ROOT,
         ).check()
 
 
-def test_a_mixed_suite_uses_each_commands_report_format(
-    processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_a_mixed_suite_uses_each_commands_report_format() -> None:
+    processes = ReportProcesses()
+    command_factory = make_command_factory(executor=processes)
     checks = (
         ruff_check(check_id="lint"),
         Check(
@@ -279,31 +307,9 @@ def test_a_mixed_suite_uses_each_commands_report_format(
         ),
     )
 
-    def run(
-        *,
-        check_id: str,
-        argv: tuple[str, ...],
-        cwd: Path,
-        heartbeat_interval_seconds: float,
-    ) -> subprocess.CompletedProcess[str]:
-        reports = {
-            "ruff": "[]",
-            "semgrep": '{"results": [], "errors": []}',
-            "ty": "[]",
-        }
-        processes.stdout = reports[argv[3]]
-        return processes.run(
-            check_id=check_id,
-            argv=argv,
-            cwd=cwd,
-            heartbeat_interval_seconds=heartbeat_interval_seconds,
-        )
-
-    monkeypatch.setattr("checksmith.commands.command.run_process", run)
-
     output = Runner(
         checks=checks,
-        commands=CommandFactory.registry(),
+        commands=command_factory.registry(),
         project_root=PROJECT_ROOT,
     ).check()
 
@@ -446,26 +452,25 @@ def test_eligibility_is_checked_once_per_check_immediately_before_execution() ->
     assert output.exit_code is ExitCode.UNHEALTHY
 
 
-def test_non_runnable_checks_never_start_a_subprocess(
+def test_non_runnable_checks_never_start_a_command(
     checks: tuple[Check, ...],
-    processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="checksmith")
 
-    def not_runnable(self: Command, *, check: Check, project_root: Path) -> bool:
-        return False
-
-    monkeypatch.setattr(Command, "check_is_runnable", not_runnable)
+    recorder = EligibilityCommand(
+        results={},
+        eligibility={check.id: False for check in checks},
+    )
 
     output = Runner(
         checks=checks,
-        commands=CommandFactory.registry(),
+        commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
     ).check()
 
-    assert processes.started == []
+    assert recorder.runs == []
+    assert recorder.calls == [("eligibility", check, PROJECT_ROOT) for check in checks]
     assert tuple(result.check_id for result in output.results) == ("lint", "format")
     assert all(result.status is CheckStatus.SKIPPED for result in output.results)
     assert output.exit_code is ExitCode.SUCCESS

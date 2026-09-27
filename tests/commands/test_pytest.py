@@ -1,12 +1,12 @@
 import logging
 import shlex
 from collections.abc import Callable
-from os import stat_result
 from pathlib import Path
 
 import pytest
 
-from checksmith.commands.pytest import PytestCommand
+from checksmith.commands.pytest import PackagedLauncherSource, PytestCommand
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check, ConfigPath
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import (
@@ -14,6 +14,7 @@ from checksmith.errors import (
     CheckOutputError,
     CheckPrerequisiteError,
 )
+from checksmith.packages import UvPackage
 from tests.conftest import FakeProcesses
 
 
@@ -49,11 +50,12 @@ def test_the_adapter_does_not_import_the_host_pytest(
     [(10, CheckStatus.PASSED), (11, CheckStatus.FAILED), (16, CheckStatus.FAILED)],
 )
 def test_pytest_outcomes_preserve_native_diagnostics(
+    command_factory: CommandFactory,
     exit_code: int,
     expected: CheckStatus,
     tmp_path: Path,
 ) -> None:
-    result = PytestCommand().process_response(
+    result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="unit-tests",
         project_root=tmp_path,
         exit_code=exit_code,
@@ -71,8 +73,10 @@ def test_pytest_outcomes_preserve_native_diagnostics(
     )
 
 
-def test_no_collected_tests_pass_with_an_explicit_explanation(tmp_path: Path) -> None:
-    result = PytestCommand().process_response(
+def test_no_collected_tests_pass_with_an_explicit_explanation(
+    command_factory: CommandFactory, tmp_path: Path
+) -> None:
+    result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="unit-tests",
         project_root=tmp_path,
         exit_code=15,
@@ -89,11 +93,12 @@ def test_no_collected_tests_pass_with_an_explicit_explanation(tmp_path: Path) ->
 
 @pytest.mark.parametrize("exit_code", [0, 1, 2, 5, 6, 12, 13, 14, 17, 127, -9])
 def test_launcher_and_pytest_errors_keep_their_diagnostics(
+    command_factory: CommandFactory,
     exit_code: int,
     tmp_path: Path,
 ) -> None:
     with pytest.raises(CheckOutputError) as raised:
-        PytestCommand().process_response(
+        command_factory.for_name(name=CommandName.PYTEST).process_response(
             check_id="unit-tests",
             project_root=tmp_path,
             exit_code=exit_code,
@@ -108,10 +113,11 @@ def test_launcher_and_pytest_errors_keep_their_diagnostics(
 
 @pytest.mark.parametrize("exit_code", [10, 11, 16])
 def test_quiet_pytest_results_do_not_require_a_terminal_summary(
+    command_factory: CommandFactory,
     exit_code: int,
     tmp_path: Path,
 ) -> None:
-    result = PytestCommand().process_response(
+    result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="quiet-tests",
         project_root=tmp_path,
         exit_code=exit_code,
@@ -123,6 +129,7 @@ def test_quiet_pytest_results_do_not_require_a_terminal_summary(
 
 
 def test_pytest_uses_the_uv_project_interpreter(
+    command_factory: CommandFactory,
     configured_check: Check,
     project_root: Path,
     processes: FakeProcesses,
@@ -131,7 +138,9 @@ def test_pytest_uses_the_uv_project_interpreter(
     caplog.set_level(logging.DEBUG, logger="checksmith.commands.command")
     processes.exit_code = 10
 
-    result = PytestCommand().run(check=configured_check, project_root=project_root)
+    result = command_factory.for_name(name=CommandName.PYTEST).run(
+        check=configured_check, project_root=project_root
+    )
 
     process = processes.started[0]
     assert process.argv[:5] == ("uv", "run", "--locked", "python", "-c")
@@ -151,6 +160,7 @@ def test_pytest_uses_the_uv_project_interpreter(
 
 
 def test_custom_arguments_and_config_paths_reach_pytest_unchanged(
+    command_factory: CommandFactory,
     project_root: Path,
     processes: FakeProcesses,
 ) -> None:
@@ -167,7 +177,9 @@ def test_custom_arguments_and_config_paths_reach_pytest_unchanged(
         args=("integration tests/test_app.py::test_example", "-c", config_path),
     )
 
-    PytestCommand().run(check=check, project_root=project_root)
+    command_factory.for_name(name=CommandName.PYTEST).run(
+        check=check, project_root=project_root
+    )
 
     assert processes.started[0].argv[6:] == (
         "integration tests/test_app.py::test_example",
@@ -176,68 +188,8 @@ def test_custom_arguments_and_config_paths_reach_pytest_unchanged(
     )
 
 
-@pytest.mark.parametrize("filename", ["pyproject.toml", "uv.lock"])
-@pytest.mark.parametrize("kind", ["absent", "directory", "broken-symlink"])
-def test_uv_requires_project_files_before_starting_even_without_tests(
-    filename: str,
-    kind: str,
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-) -> None:
-    path = project_root / filename
-    path.unlink()
-    if kind == "directory":
-        path.mkdir()
-    elif kind == "broken-symlink":
-        path.symlink_to(project_root / "missing")
-
-    with pytest.raises(CheckPrerequisiteError) as raised:
-        PytestCommand().run(check=configured_check, project_root=project_root)
-
-    assert raised.value.config_file == path
-    assert "uv execution requires" in str(raised.value)
-    assert processes.started == []
-
-
-def test_uv_does_not_search_parent_directories_for_project_files(
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-) -> None:
-    nested = project_root / "nested"
-    nested.mkdir()
-
-    with pytest.raises(CheckPrerequisiteError) as raised:
-        PytestCommand().run(check=configured_check, project_root=nested)
-
-    assert raised.value.config_file == nested / "pyproject.toml"
-    assert processes.started == []
-
-
-def test_an_unreadable_project_file_is_an_error(
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original_stat = Path.stat
-    path = project_root / "uv.lock"
-
-    def unreadable_stat(self: Path) -> stat_result:
-        if self == path:
-            raise PermissionError("permission denied")
-        return original_stat(self)
-
-    monkeypatch.setattr(Path, "stat", unreadable_stat)
-
-    with pytest.raises(CheckPrerequisiteError, match="permission denied"):
-        PytestCommand().run(check=configured_check, project_root=project_root)
-
-    assert processes.started == []
-
-
 def test_an_unavailable_uv_reports_an_execution_error(
+    command_factory: CommandFactory,
     project_root: Path,
     configured_check: Check,
     processes: FakeProcesses,
@@ -245,88 +197,124 @@ def test_an_unavailable_uv_reports_an_execution_error(
     processes.refusal = FileNotFoundError("uv not installed")
 
     with pytest.raises(CheckExecutionError) as raised:
-        PytestCommand().run(check=configured_check, project_root=project_root)
+        command_factory.for_name(name=CommandName.PYTEST).run(
+            check=configured_check, project_root=project_root
+        )
 
     assert raised.value.program == "uv"
     assert raised.value.working_directory == project_root
 
 
-@pytest.mark.parametrize("variable", ["UV_PROJECT", "UV_WORKING_DIR"])
-def test_uv_cannot_redirect_the_configured_project_root(
-    variable: str,
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
+class RecordingSource:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.reads = 0
+
+    def read(self) -> str:
+        self.reads += 1
+        return self.content
+
+
+class RecordingPackage(UvPackage):
+    def __init__(self) -> None:
+        self.calls: list[tuple[str | None, str, tuple[str, ...]]] = []
+
+    def build_argv(
+        self, *, package: str | None, command: str, arguments: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        self.calls.append((package, command, arguments))
+        return ("custom-uv", "run", command, *arguments)
+
+
+class RecordingPrerequisites:
+    def __init__(self, failure: CheckPrerequisiteError | None) -> None:
+        self.failure = failure
+        self.calls: list[tuple[Check, Path]] = []
+
+    def validate(self, *, check: Check, project_root: Path) -> None:
+        self.calls.append((check, project_root))
+        if self.failure is not None:
+            raise self.failure
+
+
+def test_pytest_uses_injected_source_package_and_prerequisites(
+    configured_check: Check, processes: FakeProcesses, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv(variable, str(project_root / "another-project"))
-
-    with pytest.raises(CheckPrerequisiteError, match=f"Unset {variable}"):
-        PytestCommand().run(check=configured_check, project_root=project_root)
-
-    assert processes.started == []
-
-
-@pytest.mark.parametrize("setting", ["1", "true", "TRUE", "yes", "invalid"])
-def test_uv_cannot_disable_lock_validation_through_the_environment(
-    setting: str,
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("UV_NO_SYNC", setting)
-
-    with pytest.raises(
-        CheckPrerequisiteError, match="UV_NO_SYNC must be unset or false"
-    ):
-        PytestCommand().run(check=configured_check, project_root=project_root)
-
-    assert processes.started == []
-
-
-@pytest.mark.parametrize("setting", ["0", "false", "FALSE", "no", "off"])
-def test_uv_allows_sync_to_remain_enabled_explicitly(
-    setting: str,
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("UV_NO_SYNC", setting)
+    source = RecordingSource(content="injected launcher")
+    package = RecordingPackage()
+    prerequisites = RecordingPrerequisites(failure=None)
+    command = PytestCommand(
+        executor=processes,
+        uv_prerequisites=prerequisites,
+        source=source,
+        package=package,
+    )
     processes.exit_code = 10
+    assert source.reads == 0
 
-    result = PytestCommand().run(check=configured_check, project_root=project_root)
+    command.run(check=configured_check, project_root=tmp_path)
 
-    assert result.status is CheckStatus.PASSED
-    assert len(processes.started) == 1
-
-
-def test_uv_requires_a_managed_project(
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
-) -> None:
-    (project_root / "pyproject.toml").write_text(
-        "[tool.uv]\nmanaged = false\n", encoding="utf-8"
+    assert source.reads == 1
+    assert package.calls == [(None, "python", ("-c", "injected launcher", "tests"))]
+    assert prerequisites.calls == [(configured_check, tmp_path)]
+    assert processes.started[0].argv == (
+        "custom-uv",
+        "run",
+        "python",
+        "-c",
+        "injected launcher",
+        "tests",
     )
 
-    with pytest.raises(CheckPrerequisiteError, match="tool.uv.managed=true"):
-        PytestCommand().run(check=configured_check, project_root=project_root)
 
+def test_failed_prerequisites_prevent_process_execution(
+    configured_check: Check, processes: FakeProcesses, tmp_path: Path
+) -> None:
+    failure = CheckPrerequisiteError(
+        check_id=configured_check.id,
+        command=CommandName.PYTEST,
+        config_file=tmp_path / "uv.lock",
+        problem="locked project missing",
+    )
+    command = PytestCommand(
+        executor=processes,
+        uv_prerequisites=RecordingPrerequisites(failure=failure),
+        source=RecordingSource(content="launcher"),
+        package=RecordingPackage(),
+    )
+
+    with pytest.raises(CheckPrerequisiteError) as raised:
+        command.run(check=configured_check, project_root=tmp_path)
+
+    assert raised.value is failure
     assert processes.started == []
 
 
-@pytest.mark.parametrize("contents", [b"[project\n", b"\xff"])
-def test_uv_reports_an_invalid_project_manifest_before_execution(
-    contents: bytes,
-    project_root: Path,
-    configured_check: Check,
-    processes: FakeProcesses,
+def test_packaged_launcher_source_reads_utf8_only_when_requested(
+    tmp_path: Path,
 ) -> None:
-    (project_root / "pyproject.toml").write_bytes(contents)
+    resource = tmp_path / "launcher.py"
+    source = PackagedLauncherSource(resource=resource)
+    resource.write_text("print('café')\n", encoding="utf-8")
 
-    with pytest.raises(CheckPrerequisiteError, match="invalid pyproject.toml"):
-        PytestCommand().run(check=configured_check, project_root=project_root)
+    assert source.read() == "print('café')\n"
 
+
+def test_failed_launcher_reads_propagate_before_validation_or_execution(
+    configured_check: Check, processes: FakeProcesses, tmp_path: Path
+) -> None:
+    prerequisites = RecordingPrerequisites(failure=None)
+    package = RecordingPackage()
+    command = PytestCommand(
+        executor=processes,
+        uv_prerequisites=prerequisites,
+        source=PackagedLauncherSource(resource=tmp_path / "missing.py"),
+        package=package,
+    )
+
+    with pytest.raises(FileNotFoundError):
+        command.run(check=configured_check, project_root=tmp_path)
+
+    assert prerequisites.calls == []
+    assert package.calls == []
     assert processes.started == []

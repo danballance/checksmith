@@ -7,6 +7,7 @@ from pydantic import JsonValue
 
 from checksmith.commands.command import Command
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError
@@ -93,6 +94,7 @@ HEALTHY_REPORT = report_json(findings=[])
 def test_command_uses_normal_subprocess_execution(
     tmp_path: Path,
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     check = Check(
         id="architecture",
@@ -103,7 +105,9 @@ def test_command_uses_normal_subprocess_execution(
     )
     processes.stdout = HEALTHY_REPORT
 
-    result = PyArchGraphCommand().run(check=check, project_root=tmp_path)
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).run(
+        check=check, project_root=tmp_path
+    )
 
     assert PyArchGraphCommand.run is Command.run
     assert result.status is CheckStatus.PASSED
@@ -132,8 +136,9 @@ def test_each_finding_fails_with_actionable_locations(
     finding: JsonValue,
     message: str,
     tmp_path: Path,
+    command_factory: CommandFactory,
 ) -> None:
-    result = PyArchGraphCommand().process_response(
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
         check_id="architecture",
         project_root=tmp_path,
         exit_code=1,
@@ -148,8 +153,10 @@ def test_each_finding_fails_with_actionable_locations(
     assert "src/app.py:3:1" in result.messages[1]
 
 
-def test_all_evidence_and_findings_are_reported(tmp_path: Path) -> None:
-    result = PyArchGraphCommand().process_response(
+def test_all_evidence_and_findings_are_reported(
+    tmp_path: Path, command_factory: CommandFactory
+) -> None:
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
         check_id="architecture",
         project_root=tmp_path,
         exit_code=1,
@@ -166,10 +173,12 @@ def test_all_evidence_and_findings_are_reported(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("exit_code", [-9, 2, 3, 127])
 def test_analysis_and_unexpected_exits_are_errors(
-    exit_code: int, tmp_path: Path
+    exit_code: int,
+    tmp_path: Path,
+    command_factory: CommandFactory,
 ) -> None:
     with pytest.raises(CheckOutputError, match=f"exited {exit_code}") as caught:
-        PyArchGraphCommand().process_response(
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=exit_code,
@@ -188,9 +197,10 @@ def test_exit_must_agree_with_findings(
     exit_code: int,
     findings: list[JsonValue],
     tmp_path: Path,
+    command_factory: CommandFactory,
 ) -> None:
     with pytest.raises(CheckOutputError, match="exit code disagrees"):
-        PyArchGraphCommand().process_response(
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=exit_code,
@@ -202,9 +212,11 @@ def test_exit_must_agree_with_findings(
 @pytest.mark.parametrize(
     "stdout", ["", "not json", "[]", "{}", HEALTHY_REPORT + "noise"]
 )
-def test_stdout_must_be_a_complete_json_report(stdout: str, tmp_path: Path) -> None:
+def test_stdout_must_be_a_complete_json_report(
+    stdout: str, tmp_path: Path, command_factory: CommandFactory
+) -> None:
     with pytest.raises(CheckOutputError, match="Invalid PyArchGraph report on stdout"):
-        PyArchGraphCommand().process_response(
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=0,
@@ -226,11 +238,13 @@ def test_stdout_must_be_a_complete_json_report(stdout: str, tmp_path: Path) -> N
         ("unexpected", "extra"),
     ],
 )
-def test_report_schema_is_strict(field: str, value: JsonValue, tmp_path: Path) -> None:
+def test_report_schema_is_strict(
+    field: str, value: JsonValue, tmp_path: Path, command_factory: CommandFactory
+) -> None:
     payload = json.loads(HEALTHY_REPORT)
     payload[field] = value
     with pytest.raises(CheckOutputError, match="schema 0.5"):
-        PyArchGraphCommand().process_response(
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=0,
@@ -266,9 +280,11 @@ def test_report_schema_is_strict(field: str, value: JsonValue, tmp_path: Path) -
         },
     ],
 )
-def test_malformed_findings_are_errors(finding: JsonValue, tmp_path: Path) -> None:
+def test_malformed_findings_are_errors(
+    finding: JsonValue, tmp_path: Path, command_factory: CommandFactory
+) -> None:
     with pytest.raises(CheckOutputError, match="schema 0.5"):
-        PyArchGraphCommand().process_response(
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=1,
@@ -277,12 +293,14 @@ def test_malformed_findings_are_errors(finding: JsonValue, tmp_path: Path) -> No
         )
 
 
-def test_mixed_component_does_not_overstate_possible_members(tmp_path: Path) -> None:
+def test_mixed_component_does_not_overstate_possible_members(
+    tmp_path: Path, command_factory: CommandFactory
+) -> None:
     finding = {
         **cycle_finding("definite"),
         "members": ["app", "plugin", "service"],
     }
-    result = PyArchGraphCommand().process_response(
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
         check_id="architecture",
         project_root=tmp_path,
         exit_code=1,

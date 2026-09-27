@@ -5,11 +5,11 @@ from typing import Final
 
 import pytest
 
-from checksmith.commands.ty import TyCommand
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError
-from tests.conftest import FakeProcesses
+from tests.conftest import FakeProcesses, make_command_factory
 
 PROJECT_ROOT = Path("/workspace/project")
 
@@ -31,12 +31,16 @@ TY_REPORT: Final = r"""[
 
 
 def read_ty(*, stdout: str, exit_code: int, stderr: str) -> CheckResult:
-    return TyCommand().process_response(
-        check_id="types",
-        project_root=PROJECT_ROOT,
-        exit_code=exit_code,
-        stdout=stdout,
-        stderr=stderr,
+    return (
+        make_command_factory(executor=FakeProcesses())
+        .for_name(name=CommandName.TY)
+        .process_response(
+            check_id="types",
+            project_root=PROJECT_ROOT,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
     )
 
 
@@ -123,7 +127,9 @@ def test_ty_paths_are_relative_to_the_checked_project(
     assert result.messages[0].startswith(f"{expected_path}:1:14 invalid-assignment:")
 
 
-def test_ty_paths_resolve_a_symlinked_project_root(tmp_path: Path) -> None:
+def test_ty_paths_resolve_a_symlinked_project_root(
+    tmp_path: Path, command_factory: CommandFactory
+) -> None:
     project = tmp_path / "project"
     project.mkdir()
     link = tmp_path / "link"
@@ -132,7 +138,7 @@ def test_ty_paths_resolve_a_symlinked_project_root(tmp_path: Path) -> None:
         "/workspace/project/example.py", str(project / "example.py")
     )
 
-    result = TyCommand().process_response(
+    result = command_factory.for_name(name=CommandName.TY).process_response(
         check_id="types",
         project_root=link,
         exit_code=1,
@@ -248,6 +254,7 @@ def test_ty_exit_one_with_an_empty_report_is_an_error() -> None:
 
 def test_ty_runs_the_configured_arguments_under_a_custom_check_id(
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     processes.stdout = "[]"
     check = Check(
@@ -258,7 +265,9 @@ def test_ty_runs_the_configured_arguments_under_a_custom_check_id(
         args=("check", "--output-format", "gitlab", "--error-on-warning", "src"),
     )
 
-    result = TyCommand().run(check=check, project_root=PROJECT_ROOT)
+    result = command_factory.for_name(name=CommandName.TY).run(
+        check=check, project_root=PROJECT_ROOT
+    )
 
     assert processes.started[0].argv == (
         "uvx",

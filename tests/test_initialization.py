@@ -7,6 +7,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from checksmith.config import Config, ConfigPath
+from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
 from checksmith.errors import ChecksmithError
 from checksmith.initialization import (
     Initializer,
@@ -420,7 +421,7 @@ def test_generated_config_resolves_the_root_and_companion_files(
 ) -> None:
     initializer.initialize(destination=destination, project_root=project_root)
 
-    config = Config.from_path(
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
         config_file=destination / "checksmith.yaml",
         working_directory=tmp_path,
     )

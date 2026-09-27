@@ -1,28 +1,37 @@
 """Tests for :mod:`checksmith.cli`."""
 
 import json
+import logging
+import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
 
 import pytest
 import typer
 import yaml
+from rich.console import Console
+from rich.logging import RichHandler
 from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
 from checksmith import __version__
+from checksmith.checking import CheckService, CommandRegistry
 from checksmith.cli import (
     ChecksmithGroup,
+    CliApplication,
     DebugOption,
     OutputFormat,
-    _emit,
-    app,
+)
+from checksmith.cli import (
+    app as production_app,
 )
 from checksmith.commands.command import Command
 from checksmith.commands.registry import CommandFactory
-from checksmith.config import Check, Config
+from checksmith.config import Check
+from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
 from checksmith.dtos import (
     CheckResult,
     CheckStatus,
@@ -31,11 +40,18 @@ from checksmith.dtos import (
     PackageType,
 )
 from checksmith.errors import CheckOutputError, ConfigSyntaxError
-from checksmith.logs import configure_logging
+from checksmith.initialization import (
+    Initializer,
+    LocalInitializationFilesystem,
+    PackagedAssetSource,
+    YamlConfigRenderer,
+)
+from checksmith.logs import LOGGER_NAME, LoggingConfigurator
 from checksmith.outputs.checkoutput import CheckOutput
-from checksmith.packages import UvxPackage
+from checksmith.presentation import OutputPresenter
+from checksmith.processes import LocalProcessRuntime, SubprocessExecutor
 from tests.commands.test_pyarchgraph import HEALTHY_REPORT, cycle_finding, report_json
-from tests.conftest import FakeProcesses
+from tests.conftest import FakeProcesses, make_command_factory
 
 
 def test_cli_imports_the_command_factory_and_implementations(
@@ -55,12 +71,117 @@ def test_cli_imports_the_command_factory_and_implementations(
     } <= modules
 
 
+def make_app(commands: CommandRegistry) -> typer.Typer:
+    return CliApplication(
+        checks=CheckService(
+            loader=ConfigLoader(source=LocalYamlConfigSource()), commands=commands
+        ),
+        initializer=Initializer(
+            assets=PackagedAssetSource(
+                directory=files("checksmith") / "assets" / "default"
+            ),
+            renderer=YamlConfigRenderer(),
+            filesystem=LocalInitializationFilesystem(),
+        ),
+        presenter=OutputPresenter(console=Console()),
+        logging=LoggingConfigurator(
+            logger=logging.getLogger(LOGGER_NAME),
+            handler=RichHandler(
+                console=Console(stderr=True),
+                show_time=True,
+                show_level=True,
+                show_path=True,
+                rich_tracebacks=True,
+                markup=False,
+            ),
+        ),
+    ).build()
+
+
+@pytest.fixture
+def app(command_factory: CommandFactory) -> typer.Typer:
+    return make_app(commands=command_factory)
+
+
+class FixedCommandRegistry:
+    def __init__(self, commands: Mapping[CommandName, Command]) -> None:
+        self.commands = commands
+
+    def registry(self) -> Mapping[CommandName, Command]:
+        return self.commands
+
+
+class ForbiddenCommandRegistry:
+    def registry(self) -> Mapping[CommandName, Command]:
+        pytest.fail("Invalid input must fail before constructing commands")
+
+
+class ScriptedCommand(Command):
+    def __init__(
+        self, outcomes: Mapping[str, CheckResult | Exception], runnable: bool
+    ) -> None:
+        self.outcomes = outcomes
+        self.runnable = runnable
+        self.eligibility_checks: list[str] = []
+        self.executed: list[Check] = []
+        self.roots: list[Path] = []
+
+    @property
+    def name(self) -> CommandName:
+        return CommandName.RUFF
+
+    def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
+        self.eligibility_checks.append(check.id)
+        return self.runnable
+
+    def run(self, *, check: Check, project_root: Path) -> CheckResult:
+        self.executed.append(check)
+        self.roots.append(project_root)
+        outcome = self.outcomes[check.id]
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    def process_response(
+        self,
+        *,
+        check_id: str,
+        project_root: Path,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+    ) -> CheckResult:
+        raise AssertionError("Scripted command does not process subprocess output")
+
+
+class PythonProcessExecutor:
+    def __init__(self, source: str) -> None:
+        self.source = source
+
+    def run(
+        self,
+        *,
+        check_id: str,
+        argv: tuple[str, ...],
+        cwd: Path,
+        heartbeat_interval_seconds: float,
+    ) -> subprocess.CompletedProcess[str]:
+        return SubprocessExecutor(runtime=LocalProcessRuntime()).run(
+            check_id=check_id,
+            argv=(sys.executable, "-c", self.source),
+            cwd=cwd,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     return CliRunner()
 
 
-def test_version_reports_the_installed_version(cli_runner: CliRunner) -> None:
+def test_version_reports_the_installed_version(
+    app: typer.Typer, cli_runner: CliRunner
+) -> None:
     result = cli_runner.invoke(app, ["--version"])
 
     assert result.exit_code == ExitCode.SUCCESS
@@ -69,6 +190,7 @@ def test_version_reports_the_installed_version(cli_runner: CliRunner) -> None:
 
 @pytest.mark.parametrize("help_option", ["-h", "--help"])
 def test_both_help_options_are_accepted(
+    app: typer.Typer,
     cli_runner: CliRunner,
     help_option: str,
 ) -> None:
@@ -78,13 +200,14 @@ def test_both_help_options_are_accepted(
     assert "Manage coding-agent integrations" in result.stdout
 
 
-def test_no_arguments_shows_help(cli_runner: CliRunner) -> None:
+def test_no_arguments_shows_help(app: typer.Typer, cli_runner: CliRunner) -> None:
     result = cli_runner.invoke(app, [])
 
     assert "Usage" in result.stdout
 
 
 def test_init_prompts_with_the_current_directory_and_accepts_enter(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -105,12 +228,19 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
     }
     assert all(
         filename in result.stdout
-        for filename in ("checksmith.yaml", "ruff.toml", "semgrep.yaml", "coverage.toml")
+        for filename in (
+            "checksmith.yaml",
+            "ruff.toml",
+            "semgrep.yaml",
+            "coverage.toml",
+        )
     )
     config_path = tmp_path / "checksmith.yaml"
     assert yaml.safe_load(config_path.read_text())["project_root"] == "."
     assert (
-        Config.from_path(config_file=config_path, working_directory=tmp_path).project_root
+        ConfigLoader(source=LocalYamlConfigSource())
+        .load(config_file=config_path, working_directory=tmp_path)
+        .project_root
         == tmp_path
     )
 
@@ -118,6 +248,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
 @pytest.mark.parametrize("absolute", [False, True])
 @pytest.mark.parametrize("prompt", [False, True])
 def test_init_selects_another_project_root_and_writes_in_the_current_directory(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -145,7 +276,9 @@ def test_init_selects_another_project_root_and_writes_in_the_current_directory(
     assert yaml.safe_load(config_path.read_text())["project_root"] == (
         f"../{project_root.name}"
     )
-    config = Config.from_path(config_file=config_path, working_directory=destination)
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
+        config_file=config_path, working_directory=destination
+    )
     assert config.project_root == project_root
     assert list(project_root.iterdir()) == []
 
@@ -153,6 +286,7 @@ def test_init_selects_another_project_root_and_writes_in_the_current_directory(
 @pytest.mark.parametrize("root_kind", ["missing", "file"])
 @pytest.mark.parametrize("prompt", [False, True])
 def test_init_reports_invalid_roots_without_retrying_or_creating_files(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -180,6 +314,7 @@ def test_init_reports_invalid_roots_without_retrying_or_creating_files(
 
 
 def test_init_refuses_collisions_without_creating_other_files(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -199,6 +334,7 @@ def test_init_refuses_collisions_without_creating_other_files(
 
 
 def test_init_aborts_on_end_of_input_without_creating_files(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -214,6 +350,7 @@ def test_init_aborts_on_end_of_input_without_creating_files(
 
 
 def test_init_aborts_on_keyboard_interrupt_without_creating_files(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -223,7 +360,10 @@ def test_init_aborts_on_keyboard_interrupt_without_creating_files(
 
     monkeypatch.chdir(tmp_path)
 
-    with cli_runner.isolation() as (_, stderr, _), monkeypatch.context() as prompt_patch:
+    with (
+        cli_runner.isolation() as (_, stderr, _),
+        monkeypatch.context() as prompt_patch,
+    ):
         prompt_patch.setattr("click.termui.visible_prompt_func", interrupt)
 
         with pytest.raises(SystemExit) as raised:
@@ -237,6 +377,7 @@ def test_init_aborts_on_keyboard_interrupt_without_creating_files(
 
 @pytest.mark.parametrize("operation", ["check"])
 def test_check_requires_a_config_to_be_named(
+    app: typer.Typer,
     cli_runner: CliRunner,
     operation: str,
 ) -> None:
@@ -263,16 +404,9 @@ def test_process_debug_output_stays_on_stderr(
 ) -> None:
     source = "import sys; print('[]'); sys.stderr.write('tool progress\\n')"
 
-    def python_argv(
-        self: UvxPackage,
-        *,
-        package: str | None,
-        command: str,
-        arguments: tuple[str, ...],
-    ) -> tuple[str, ...]:
-        return (sys.executable, "-c", source)
-
-    monkeypatch.setattr(UvxPackage, "build_argv", python_argv)
+    app = make_app(
+        commands=make_command_factory(executor=PythonProcessExecutor(source))
+    )
     monkeypatch.setenv("COLUMNS", "300")
 
     result = cli_runner.invoke(
@@ -319,6 +453,7 @@ def test_process_debug_output_stays_on_stderr(
 
 
 def test_check_loads_the_named_config_and_runs_what_it_declares(
+    app: typer.Typer,
     cli_runner: CliRunner,
     config_tree: Path,
     processes: FakeProcesses,
@@ -366,6 +501,7 @@ def selection_config_file(config_file: Path) -> Path:
 
 @pytest.mark.parametrize("check_id", [None, "lint-tests"])
 def test_selection_preserves_arguments_and_project_root(
+    app: typer.Typer,
     cli_runner: CliRunner,
     selection_config_file: Path,
     processes: FakeProcesses,
@@ -425,42 +561,22 @@ def test_selection_preserves_arguments_and_project_root(
 def test_only_the_selected_check_runs_its_hooks_and_reports_a_result(
     cli_runner: CliRunner,
     selection_config_file: Path,
-    monkeypatch: pytest.MonkeyPatch,
     operation: str,
     fmt: OutputFormat,
     status: CheckStatus,
     expected_exit_code: ExitCode,
     label: str,
 ) -> None:
-    eligibility_checks: list[str] = []
-    executed: list[str] = []
     skipped = operation == "check" and status is CheckStatus.SKIPPED
     expected = CheckResult(
         check_id="lint-tests",
         status=status,
         messages=("Check is not applicable to this project.",) if skipped else (),
     )
-
-    def is_runnable(command: Command, *, check: Check, project_root: Path) -> bool:
-        eligibility_checks.append(check.id)
-        return status is not CheckStatus.SKIPPED
-
-    def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
-        executed.append(check.id)
-        assert check.id == "lint-tests"
-        assert project_root == selection_config_file.parent.parent
-        assert check.arguments == (
-            "check",
-            "--config",
-            str(selection_config_file.parent / "ruff.toml"),
-            "--output-format",
-            "json",
-            "tests",
-        )
-        return expected
-
-    monkeypatch.setattr(Command, "check_is_runnable", is_runnable)
-    monkeypatch.setattr(Command, "run", run)
+    command = ScriptedCommand(
+        outcomes={"lint-tests": expected}, runnable=status is not CheckStatus.SKIPPED
+    )
+    app = make_app(commands=FixedCommandRegistry({CommandName.RUFF: command}))
 
     result = cli_runner.invoke(
         app,
@@ -477,8 +593,22 @@ def test_only_the_selected_check_runs_its_hooks_and_reports_a_result(
 
     assert result.exit_code == expected_exit_code
     assert result.stderr == ""
-    assert eligibility_checks == (["lint-tests"] if operation == "check" else [])
-    assert executed == ([] if skipped else ["lint-tests"])
+    assert command.eligibility_checks == (
+        ["lint-tests"] if operation == "check" else []
+    )
+    assert [check.id for check in command.executed] == (
+        [] if skipped else ["lint-tests"]
+    )
+    if not skipped:
+        assert command.roots == [selection_config_file.parent.parent]
+        assert command.executed[0].arguments == (
+            "check",
+            "--config",
+            str(selection_config_file.parent / "ruff.toml"),
+            "--output-format",
+            "json",
+            "tests",
+        )
     if fmt is OutputFormat.JSON:
         assert json.loads(result.stdout) == {
             "results": [expected.model_dump(mode="json")]
@@ -489,14 +619,6 @@ def test_only_the_selected_check_runs_its_hooks_and_reports_a_result(
         assert label in result.stdout
 
 
-@pytest.fixture
-def forbid_command_registry(monkeypatch: pytest.MonkeyPatch) -> None:
-    def registry() -> Mapping[CommandName, Command]:
-        pytest.fail("Invalid input must fail before constructing commands")
-
-    monkeypatch.setattr(CommandFactory, "registry", registry)
-
-
 @pytest.mark.parametrize("operation", ["check"])
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 @pytest.mark.parametrize(
@@ -505,11 +627,12 @@ def forbid_command_registry(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_an_unknown_check_id_fails_before_execution(
     cli_runner: CliRunner,
     selection_config_file: Path,
-    forbid_command_registry: None,
     operation: str,
     fmt: OutputFormat,
     check_id: str,
 ) -> None:
+    app = make_app(commands=ForbiddenCommandRegistry())
+
     result = cli_runner.invoke(
         app,
         [
@@ -543,7 +666,6 @@ def test_an_unknown_check_id_fails_before_execution(
 def test_selection_still_validates_the_complete_configuration(
     cli_runner: CliRunner,
     selection_config_file: Path,
-    forbid_command_registry: None,
     operation: str,
     check_id: str | None,
     original: str,
@@ -560,6 +682,8 @@ def test_selection_still_validates_the_complete_configuration(
     if check_id is not None:
         arguments.extend(["--check", check_id])
 
+    app = make_app(commands=ForbiddenCommandRegistry())
+
     result = cli_runner.invoke(app, arguments)
 
     assert result.exit_code == ExitCode.ERROR
@@ -569,6 +693,7 @@ def test_selection_still_validates_the_complete_configuration(
 
 
 def test_a_check_that_found_something_reports_it_and_exits_unhealthy(
+    app: typer.Typer,
     cli_runner: CliRunner,
     config_tree: Path,
     processes: FakeProcesses,
@@ -599,6 +724,7 @@ def test_a_check_that_found_something_reports_it_and_exits_unhealthy(
 
 
 def test_check_accepts_an_absolute_config_file(
+    app: typer.Typer,
     cli_runner: CliRunner,
     config_file: Path,
     config_tree: Path,
@@ -619,6 +745,7 @@ def test_check_accepts_an_absolute_config_file(
 
 
 def test_a_tool_that_cannot_scan_is_reported_as_an_error_row(
+    app: typer.Typer,
     cli_runner: CliRunner,
     config_tree: Path,
     processes: FakeProcesses,
@@ -698,6 +825,7 @@ def pytest_project_root(pytest_config_file: Path) -> Path:
     ],
 )
 def test_cli_reports_project_pytest_results_and_native_diagnostics(
+    app: typer.Typer,
     cli_runner: CliRunner,
     pytest_config_file: Path,
     pytest_project_root: Path,
@@ -743,6 +871,7 @@ def test_cli_reports_project_pytest_results_and_native_diagnostics(
 
 
 def test_cli_runs_pytest_from_the_configured_root_when_invoked_elsewhere(
+    app: typer.Typer,
     cli_runner: CliRunner,
     pytest_config_file: Path,
     pytest_project_root: Path,
@@ -762,6 +891,7 @@ def test_cli_runs_pytest_from_the_configured_root_when_invoked_elsewhere(
 
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 def test_cli_reports_a_missing_uv_project_as_an_error_even_without_tests(
+    app: typer.Typer,
     cli_runner: CliRunner,
     pytest_config_file: Path,
     processes: FakeProcesses,
@@ -802,6 +932,7 @@ def semgrep_config_file(tmp_path: Path) -> Path:
 
 
 def test_cli_reports_a_clean_semgrep_scan(
+    app: typer.Typer,
     cli_runner: CliRunner,
     semgrep_config_file: Path,
     processes: FakeProcesses,
@@ -823,6 +954,7 @@ def test_cli_reports_a_clean_semgrep_scan(
 
 @pytest.mark.parametrize("tool_exit_code", [0, 1])
 def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
+    app: typer.Typer,
     cli_runner: CliRunner,
     semgrep_config_file: Path,
     processes: FakeProcesses,
@@ -878,6 +1010,7 @@ def test_cli_reports_semgrep_findings_as_an_unhealthy_check(
     ],
 )
 def test_cli_reports_semgrep_scan_failures_as_errors(
+    app: typer.Typer,
     cli_runner: CliRunner,
     semgrep_config_file: Path,
     processes: FakeProcesses,
@@ -932,6 +1065,7 @@ def pyarchgraph_config_file(tmp_path: Path) -> Path:
     ],
 )
 def test_cli_reports_pyarchgraph_findings(
+    app: typer.Typer,
     cli_runner: CliRunner,
     pyarchgraph_config_file: Path,
     processes: FakeProcesses,
@@ -980,6 +1114,7 @@ def test_cli_reports_pyarchgraph_findings(
     ],
 )
 def test_cli_reports_pyarchgraph_errors(
+    app: typer.Typer,
     cli_runner: CliRunner,
     pyarchgraph_config_file: Path,
     processes: FakeProcesses,
@@ -1010,7 +1145,9 @@ def test_cli_reports_pyarchgraph_errors(
         assert "ERROR" in result.stdout
 
 
-def test_prepare_is_no_longer_a_command(cli_runner: CliRunner) -> None:
+def test_prepare_is_no_longer_a_command(
+    app: typer.Typer, cli_runner: CliRunner
+) -> None:
     result = cli_runner.invoke(app, ["prepare"])
     assert result.exit_code == ExitCode.ERROR
     assert "No such command" in result.stderr
@@ -1034,6 +1171,7 @@ def ty_config_file(tmp_path: Path) -> Path:
 
 
 def test_cli_reports_a_clean_ty_check(
+    app: typer.Typer,
     cli_runner: CliRunner,
     ty_config_file: Path,
     processes: FakeProcesses,
@@ -1073,6 +1211,7 @@ def test_cli_reports_a_clean_ty_check(
     ],
 )
 def test_cli_reports_ty_errors_and_warnings_as_unhealthy(
+    app: typer.Typer,
     cli_runner: CliRunner,
     ty_config_file: Path,
     processes: FakeProcesses,
@@ -1116,6 +1255,7 @@ def test_cli_reports_ty_errors_and_warnings_as_unhealthy(
     "stdout", ["not json", '[{"description": "Missing location"}]']
 )
 def test_cli_reports_malformed_ty_output_as_an_error(
+    app: typer.Typer,
     cli_runner: CliRunner,
     ty_config_file: Path,
     processes: FakeProcesses,
@@ -1138,6 +1278,7 @@ def test_cli_reports_malformed_ty_output_as_an_error(
 
 
 def test_cli_preserves_ty_execution_failure_output(
+    app: typer.Typer,
     cli_runner: CliRunner,
     ty_config_file: Path,
     processes: FakeProcesses,
@@ -1199,6 +1340,7 @@ def import_linter_pyproject_file(import_linter_config_file: Path) -> Path:
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 @pytest.mark.parametrize("pyproject", [None, "[tool.importlinter]\ncontracts = []\n"])
 def test_cli_skips_import_linter_without_configured_contracts(
+    app: typer.Typer,
     cli_runner: CliRunner,
     import_linter_config_file: Path,
     processes: FakeProcesses,
@@ -1255,6 +1397,7 @@ def test_cli_skips_import_linter_without_configured_contracts(
     ],
 )
 def test_cli_runs_import_linter_with_contracts_and_reports_its_findings(
+    app: typer.Typer,
     cli_runner: CliRunner,
     import_linter_config_file: Path,
     import_linter_pyproject_file: Path,
@@ -1298,6 +1441,7 @@ def test_cli_runs_import_linter_with_contracts_and_reports_its_findings(
 
 @pytest.mark.parametrize("fmt", [OutputFormat.TEXT, OutputFormat.JSON])
 def test_cli_reports_malformed_import_linter_toml_as_an_error(
+    app: typer.Typer,
     cli_runner: CliRunner,
     import_linter_config_file: Path,
     processes: FakeProcesses,
@@ -1336,6 +1480,7 @@ def test_cli_reports_malformed_import_linter_toml_as_an_error(
     ],
 )
 def test_cli_still_runs_later_checks_after_an_import_linter_prerequisite_result(
+    app: typer.Typer,
     cli_runner: CliRunner,
     import_linter_config_file: Path,
     processes: FakeProcesses,
@@ -1376,7 +1521,6 @@ def test_cli_still_runs_later_checks_after_an_import_linter_prerequisite_result(
 def test_cli_reports_every_check_after_an_individual_tool_error(
     cli_runner: CliRunner,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     operation: str,
     fmt: OutputFormat,
 ) -> None:
@@ -1418,18 +1562,8 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
         "broken": error,
         "last": CheckResult(check_id="last", status=CheckStatus.PASSED, messages=()),
     }
-    runs: list[str] = []
-
-    def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
-        assert command.name is check.command
-        assert project_root == tmp_path
-        runs.append(check.id)
-        outcome = outcomes[check.id]
-        if isinstance(outcome, CheckOutputError):
-            raise outcome
-        return outcome
-
-    monkeypatch.setattr(Command, "run", run)
+    command = ScriptedCommand(outcomes=outcomes, runnable=True)
+    app = make_app(commands=FixedCommandRegistry({CommandName.RUFF: command}))
 
     result = cli_runner.invoke(
         app,
@@ -1438,7 +1572,8 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
 
     assert result.exit_code == ExitCode.ERROR
     assert result.stderr == ""
-    assert runs == list(check_ids)
+    assert [check.id for check in command.executed] == list(check_ids)
+    assert command.roots == [tmp_path] * len(check_ids)
     if fmt is OutputFormat.JSON:
         assert json.loads(result.stdout) == {
             "results": [
@@ -1468,14 +1603,11 @@ def test_cli_reports_every_check_after_an_individual_tool_error(
 def test_an_unexpected_tool_adapter_bug_reaches_the_cli_error_boundary(
     cli_runner: CliRunner,
     config_file: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def run(command: Command, *, check: Check, project_root: Path) -> CheckResult:
-        assert command.name is check.command
-        assert project_root == config_file.parent.parent
-        raise RuntimeError("adapter bug")
-
-    monkeypatch.setattr(Command, "run", run)
+    command = ScriptedCommand(
+        outcomes={"ruff": RuntimeError("adapter bug")}, runnable=True
+    )
+    app = make_app(commands=FixedCommandRegistry({CommandName.RUFF: command}))
 
     result = cli_runner.invoke(app, ["check", "--config", str(config_file)])
 
@@ -1486,6 +1618,7 @@ def test_an_unexpected_tool_adapter_bug_reaches_the_cli_error_boundary(
 
 @pytest.mark.parametrize("operation", ["check"])
 def test_check_reports_a_bad_config_option_without_typers_wording(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1506,6 +1639,7 @@ def test_check_reports_a_bad_config_option_without_typers_wording(
 
 
 def test_a_configuration_error_reaches_stderr_whatever_the_format(
+    app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
     processes: FakeProcesses,
@@ -1524,54 +1658,9 @@ def test_a_configuration_error_reaches_stderr_whatever_the_format(
     assert processes.started == []
 
 
-def test_emit_renders_json_when_asked(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(typer.Exit):
-        _emit(CheckOutput(), OutputFormat.JSON)
-
-    assert json.loads(capsys.readouterr().out) == {"results": []}
-
-
-def test_emit_renders_a_table_by_default(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    with pytest.raises(typer.Exit):
-        _emit(
-            CheckOutput(
-                results=(
-                    CheckResult(
-                        check_id="ruff", status=CheckStatus.PASSED, messages=()
-                    ),
-                )
-            ),
-            OutputFormat.TEXT,
-        )
-
-    captured = capsys.readouterr().out
-    assert "Checksmith" in captured
-    assert "ruff" in captured
-
-
-def test_emit_exits_with_the_code_its_output_implies(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    output = CheckOutput(
-        results=(
-            CheckResult(
-                check_id="ruff",
-                status=CheckStatus.FAILED,
-                messages=("app.py:1:1 F401 Unused import",),
-            ),
-        )
-    )
-
-    with pytest.raises(typer.Exit) as raised:
-        _emit(output, OutputFormat.TEXT)
-
-    assert raised.value.exit_code == ExitCode.UNHEALTHY
-
-
 @pytest.mark.parametrize("operation", ["check"])
 def test_check_rejects_an_unknown_format(
+    app: typer.Typer,
     cli_runner: CliRunner,
     operation: str,
 ) -> None:
@@ -1585,6 +1674,7 @@ def test_check_rejects_an_unknown_format(
     [["agents", "install"], ["agents", "uninstall"]],
 )
 def test_unimplemented_commands_fail_loudly(
+    app: typer.Typer,
     cli_runner: CliRunner,
     command: list[str],
 ) -> None:
@@ -1606,7 +1696,10 @@ def _grouped_app(name: str, body: Callable[[], None]) -> typer.Typer:
 
     @built.callback()
     def _root(debug: DebugOption = False) -> None:
-        configure_logging(debug=debug)
+        LoggingConfigurator(
+            logger=logging.getLogger(LOGGER_NAME),
+            handler=RichHandler(console=Console(stderr=True), markup=False),
+        ).configure(debug=debug)
 
     built.command(name)(body)
     return built
@@ -1667,6 +1760,7 @@ CLI_SCHEMA_PATH = Path(__file__).parent.parent / "checksmith-cli.yaml"
 
 
 def test_init_root_option_matches_the_cli_schema_and_appears_in_help(
+    app: typer.Typer,
     cli_runner: CliRunner,
 ) -> None:
     schema = yaml.safe_load(CLI_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -1703,6 +1797,7 @@ def test_init_root_option_matches_the_cli_schema_and_appears_in_help(
 
 @pytest.mark.parametrize("operation", ["check"])
 def test_check_selector_matches_the_cli_schema_and_appears_in_help(
+    app: typer.Typer,
     cli_runner: CliRunner,
     operation: str,
 ) -> None:
@@ -1766,7 +1861,9 @@ def _cli_command_paths(
     return paths
 
 
-def test_command_names_match_the_cli_schema() -> None:
+def test_command_names_match_the_cli_schema(
+    app: typer.Typer,
+) -> None:
     """The schema is the interface; drift between it and Typer is a bug."""
     schema = yaml.safe_load(CLI_SCHEMA_PATH.read_text())
     root = typer.main.get_command(app)
@@ -1791,3 +1888,31 @@ def test_exit_code_values_match_the_cli_schema() -> None:
 
 def test_exit_code_is_usable_as_an_int() -> None:
     assert int(ExitCode.UNHEALTHY) == 1
+
+
+def test_production_composition_preserves_the_executable_entry_point(
+    cli_runner: CliRunner,
+) -> None:
+    result = cli_runner.invoke(production_app, ["--version"])
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stdout.strip() == f"checksmith {__version__}"
+
+
+def test_separate_apps_keep_their_own_command_dependencies(
+    cli_runner: CliRunner,
+    config_file: Path,
+) -> None:
+    passing = FakeProcesses()
+    passing.stdout = "[]"
+    failing = FakeProcesses()
+    failing.exit_code = 2
+    failing.stderr = "invalid tool config"
+    first = make_app(commands=make_command_factory(executor=passing))
+    second = make_app(commands=make_command_factory(executor=failing))
+    arguments = ["check", "--config", str(config_file), "--format", "json"]
+
+    assert cli_runner.invoke(first, arguments).exit_code == ExitCode.SUCCESS
+    assert cli_runner.invoke(second, arguments).exit_code == ExitCode.ERROR
+    assert cli_runner.invoke(first, arguments).exit_code == ExitCode.SUCCESS
+    assert len(passing.started) == 2
+    assert len(failing.started) == 1

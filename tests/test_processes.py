@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -8,12 +7,17 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import Timer, current_thread
 from threading import enumerate as running_threads
-from typing import Literal
 
 import pytest
 
 from checksmith import processes
-from checksmith.processes import StreamName, _new_capture, run_process
+from checksmith.processes import (
+    LocalProcessRuntime,
+    ProcessRuntime,
+    StreamName,
+    SubprocessExecutor,
+    _CapturedStream,
+)
 
 
 class LogObserver(logging.Handler):
@@ -36,68 +40,101 @@ def observe_logs(callback: Callable[[logging.LogRecord], None]) -> Iterator[None
         observer.close()
 
 
-@pytest.fixture
-def children(
-    monkeypatch: pytest.MonkeyPatch,
-) -> Iterator[list[subprocess.Popen[bytes]]]:
-    started: list[subprocess.Popen[bytes]] = []
-    watchdogs: list[Timer] = []
-    expired: list[int] = []
-    popen = subprocess.Popen
+class DelegatingRuntime:
+    def __init__(self, runtime: ProcessRuntime) -> None:
+        self._runtime = runtime
 
-    def start(
-        argv: tuple[str, ...],
-        *,
-        cwd: str,
-        stdin: int,
-        stdout: int,
-        stderr: int,
-        shell: Literal[False],
-        text: Literal[False],
-        bufsize: int,
-        close_fds: bool,
-    ) -> subprocess.Popen[bytes]:
-        child = popen(
-            argv,
-            cwd=cwd,
-            stdin=stdin,
-            stdout=stdout,
-            stderr=stderr,
-            shell=shell,
-            text=text,
-            bufsize=bufsize,
-            close_fds=close_fds,
-        )
-        started.append(child)
+    def start(self, *, argv: tuple[str, ...], cwd: Path) -> subprocess.Popen[bytes]:
+        return self._runtime.start(argv=argv, cwd=cwd)
 
-        def expire() -> None:
-            expired.append(child.pid)
-            child.kill()
+    def read(self, *, fd: int, size: int) -> bytes:
+        return self._runtime.read(fd=fd, size=size)
 
-        watchdog = Timer(5.0, expire)
+    def set_nonblocking(self, *, fd: int) -> None:
+        self._runtime.set_nonblocking(fd=fd)
+
+    def monotonic(self) -> float:
+        return self._runtime.monotonic()
+
+
+class WatchedRuntime(DelegatingRuntime):
+    def __init__(self, runtime: ProcessRuntime) -> None:
+        super().__init__(runtime)
+        self.started: list[subprocess.Popen[bytes]] = []
+        self._watchdogs: list[Timer] = []
+        self._expired: list[int] = []
+
+    def start(self, *, argv: tuple[str, ...], cwd: Path) -> subprocess.Popen[bytes]:
+        child = super().start(argv=argv, cwd=cwd)
+        self.started.append(child)
+        watchdog = Timer(5.0, self._expire, args=(child,))
         watchdog.daemon = True
         watchdog.start()
-        watchdogs.append(watchdog)
+        self._watchdogs.append(watchdog)
         return child
 
-    monkeypatch.setattr(processes.subprocess, "Popen", start)
-    try:
-        yield started
-    finally:
-        for watchdog in watchdogs:
+    def _expire(self, child: subprocess.Popen[bytes]) -> None:
+        self._expired.append(child.pid)
+        child.kill()
+
+    def close(self) -> None:
+        for watchdog in self._watchdogs:
             watchdog.cancel()
             watchdog.join()
-        for child in started:
+        for child in self.started:
             child.kill()
             child.wait(timeout=5)
-        assert not expired, "A test subprocess exceeded its safety deadline"
+        assert not self._expired, "A test subprocess exceeded its safety deadline"
         assert not any(
             thread.name.startswith("checksmith-") for thread in running_threads()
         )
 
 
+class ReadFailingRuntime(DelegatingRuntime):
+    def __init__(self, runtime: ProcessRuntime, error: OSError) -> None:
+        super().__init__(runtime)
+        self._error = error
+
+    def read(self, *, fd: int, size: int) -> bytes:
+        if current_thread().name == "checksmith-broken-stderr":
+            raise self._error
+        return super().read(fd=fd, size=size)
+
+
+class SetupFailingRuntime(DelegatingRuntime):
+    def __init__(self, runtime: ProcessRuntime) -> None:
+        super().__init__(runtime)
+        self._calls = 0
+
+    def set_nonblocking(self, *, fd: int) -> None:
+        self._calls += 1
+        if self._calls == 2:
+            raise OSError("cannot configure pipe")
+        super().set_nonblocking(fd=fd)
+
+
+@pytest.fixture
+def runtime() -> Iterator[WatchedRuntime]:
+    runtime = WatchedRuntime(LocalProcessRuntime())
+    try:
+        yield runtime
+    finally:
+        runtime.close()
+
+
+@pytest.fixture
+def children(runtime: WatchedRuntime) -> list[subprocess.Popen[bytes]]:
+    return runtime.started
+
+
+@pytest.fixture
+def executor(runtime: WatchedRuntime) -> SubprocessExecutor:
+    return SubprocessExecutor(runtime)
+
+
 def test_process_preserves_arguments_cwd_stdin_and_complete_output(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -111,7 +148,7 @@ def test_process_preserves_arguments_cwd_stdin_and_complete_output(
     )
     argv = (sys.executable, "-c", source, *arguments)
 
-    result = run_process(
+    result = executor.run(
         check_id="literal",
         argv=argv,
         cwd=tmp_path,
@@ -141,6 +178,7 @@ def test_process_preserves_arguments_cwd_stdin_and_complete_output(
 @pytest.mark.parametrize(("stream", "fd"), [("stdout", 1), ("stderr", 2)])
 def test_output_without_a_newline_is_logged_before_the_process_can_exit(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     caplog: pytest.LogCaptureFixture,
     stream: StreamName,
@@ -163,7 +201,7 @@ def test_output_without_a_newline_is_logged_before_the_process_can_exit(
             release.touch()
 
     with observe_logs(acknowledge):
-        result = run_process(
+        result = executor.run(
             check_id="live",
             argv=(sys.executable, "-c", source),
             cwd=tmp_path,
@@ -186,6 +224,7 @@ def test_output_without_a_newline_is_logged_before_the_process_can_exit(
 )
 def test_heartbeats_report_activity_until_the_process_finishes(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     caplog: pytest.LogCaptureFixture,
     output: bytes,
@@ -212,7 +251,7 @@ def test_heartbeats_report_activity_until_the_process_finishes(
             release.touch()
 
     with observe_logs(observe):
-        result = run_process(
+        result = executor.run(
             check_id="waiting",
             argv=(sys.executable, "-c", source),
             cwd=tmp_path,
@@ -235,6 +274,7 @@ def test_heartbeats_report_activity_until_the_process_finishes(
 
 def test_both_output_pipes_are_drained_beyond_their_capacity(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
 ) -> None:
     source = (
@@ -244,7 +284,7 @@ def test_both_output_pipes_are_drained_beyond_their_capacity(
         "    os.write(1, b'o' * 32768)\n"
     )
 
-    result = run_process(
+    result = executor.run(
         check_id="large",
         argv=(sys.executable, "-c", source),
         cwd=tmp_path,
@@ -257,7 +297,7 @@ def test_both_output_pipes_are_drained_beyond_their_capacity(
 
 
 def test_chunk_boundaries_preserve_utf8_and_normalize_newlines() -> None:
-    capture = _new_capture()
+    capture = _CapturedStream.create()
     chunks = (b"\xe2", b"\x82", b"\xac\r", b"\nline\r", b"tail", b"")
 
     text = "".join(capture.consume(chunk) for chunk in chunks)
@@ -271,6 +311,7 @@ def test_chunk_boundaries_preserve_utf8_and_normalize_newlines() -> None:
 @pytest.mark.parametrize("output", [b"\xff", b"\xe2"])
 def test_invalid_utf8_fails_immediately_and_reaps_the_child(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     stream: int,
     output: bytes,
@@ -283,7 +324,7 @@ def test_invalid_utf8_fails_immediately_and_reaps_the_child(
     )
 
     with pytest.raises(UnicodeDecodeError):
-        run_process(
+        executor.run(
             check_id="encoding",
             argv=(sys.executable, "-c", source),
             cwd=tmp_path,
@@ -298,20 +339,13 @@ def test_invalid_utf8_fails_immediately_and_reaps_the_child(
 def test_reader_errors_propagate_and_reap_the_child(
     tmp_path: Path,
     children: list[subprocess.Popen[bytes]],
-    monkeypatch: pytest.MonkeyPatch,
+    runtime: WatchedRuntime,
 ) -> None:
     failure = OSError("cannot read stderr")
-    read = os.read
-
-    def fail_stderr(fd: int, size: int) -> bytes:
-        if current_thread().name == "checksmith-broken-stderr":
-            raise failure
-        return read(fd, size)
-
-    monkeypatch.setattr(processes.os, "read", fail_stderr)
+    executor = SubprocessExecutor(ReadFailingRuntime(runtime, failure))
 
     with pytest.raises(OSError) as raised:
-        run_process(
+        executor.run(
             check_id="broken",
             argv=(sys.executable, "-c", "import time; time.sleep(30)"),
             cwd=tmp_path,
@@ -324,6 +358,7 @@ def test_reader_errors_propagate_and_reap_the_child(
 
 def test_interruption_reaps_the_child_and_closes_its_pipes(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -334,7 +369,7 @@ def test_interruption_reaps_the_child_and_closes_its_pipes(
             raise KeyboardInterrupt
 
     with observe_logs(interrupt), pytest.raises(KeyboardInterrupt):
-        run_process(
+        executor.run(
             check_id="interrupted",
             argv=(sys.executable, "-c", "import time; time.sleep(30)"),
             cwd=tmp_path,
@@ -349,6 +384,7 @@ def test_interruption_reaps_the_child_and_closes_its_pipes(
 @pytest.mark.parametrize("interrupt", [False, True])
 def test_inherited_pipes_are_reported_as_output_collection_and_can_be_cancelled(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     caplog: pytest.LogCaptureFixture,
     interrupt: bool,
@@ -381,14 +417,14 @@ def test_inherited_pipes_are_reported_as_output_collection_and_can_be_cancelled(
     with observe_logs(observe):
         if interrupt:
             with pytest.raises(KeyboardInterrupt):
-                run_process(
+                executor.run(
                     check_id="inherited",
                     argv=(sys.executable, "-c", source),
                     cwd=tmp_path,
                     heartbeat_interval_seconds=0.05,
                 )
         else:
-            result = run_process(
+            result = executor.run(
                 check_id="inherited",
                 argv=(sys.executable, "-c", source),
                 cwd=tmp_path,
@@ -411,21 +447,12 @@ def test_inherited_pipes_are_reported_as_output_collection_and_can_be_cancelled(
 def test_pipe_setup_failure_stops_already_started_readers(
     tmp_path: Path,
     children: list[subprocess.Popen[bytes]],
-    monkeypatch: pytest.MonkeyPatch,
+    runtime: WatchedRuntime,
 ) -> None:
-    set_blocking = os.set_blocking
-    calls: list[int] = []
-
-    def fail_second_pipe(fd: int, blocking: bool) -> None:
-        calls.append(fd)
-        if len(calls) == 2:
-            raise OSError("cannot configure pipe")
-        set_blocking(fd, blocking)
-
-    monkeypatch.setattr(processes.os, "set_blocking", fail_second_pipe)
+    executor = SubprocessExecutor(SetupFailingRuntime(runtime))
 
     with pytest.raises(OSError, match="cannot configure pipe"):
-        run_process(
+        executor.run(
             check_id="setup",
             argv=(sys.executable, "-c", "import time; time.sleep(30)"),
             cwd=tmp_path,
@@ -437,13 +464,14 @@ def test_pipe_setup_failure_stops_already_started_readers(
 
 def test_failed_start_does_not_claim_a_process_started(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="checksmith.processes")
 
     with pytest.raises(FileNotFoundError):
-        run_process(
+        executor.run(
             check_id="missing",
             argv=(str(tmp_path / "missing-program"),),
             cwd=tmp_path,
@@ -457,11 +485,12 @@ def test_failed_start_does_not_claim_a_process_started(
 @pytest.mark.parametrize("interval", [0.0, -1.0, float("inf"), float("nan")])
 def test_invalid_reporting_intervals_fail_before_starting(
     tmp_path: Path,
+    executor: SubprocessExecutor,
     children: list[subprocess.Popen[bytes]],
     interval: float,
 ) -> None:
     with pytest.raises(ValueError, match="finite and positive"):
-        run_process(
+        executor.run(
             check_id="invalid",
             argv=(sys.executable, "-c", "pass"),
             cwd=tmp_path,
@@ -469,3 +498,32 @@ def test_invalid_reporting_intervals_fail_before_starting(
         )
 
     assert children == []
+
+
+def test_executor_reuse_keeps_output_and_reader_state_per_invocation(
+    tmp_path: Path,
+    executor: SubprocessExecutor,
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    first = executor.run(
+        check_id="reused",
+        argv=(sys.executable, "-c", "import sys; print('first'); sys.exit(3)"),
+        cwd=tmp_path,
+        heartbeat_interval_seconds=10.0,
+    )
+    second = executor.run(
+        check_id="reused",
+        argv=(sys.executable, "-c", "import sys; print('second', file=sys.stderr)"),
+        cwd=tmp_path,
+        heartbeat_interval_seconds=10.0,
+    )
+
+    assert first.returncode == 3
+    assert first.stdout == "first\n"
+    assert first.stderr == ""
+    assert second.returncode == 0
+    assert second.stdout == ""
+    assert second.stderr == "second\n"
+    assert len(children) == 2
+    assert all(child.stdout is not None and child.stdout.closed for child in children)
+    assert all(child.stderr is not None and child.stderr.closed for child in children)

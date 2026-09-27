@@ -1,15 +1,23 @@
 """Shared fixtures for the Checksmith test suite."""
 
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
+from importlib.resources import files
 from pathlib import Path
 
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from checksmith.commands.import_linter import ImportLinterPrerequisites
+from checksmith.commands.pytest import PackagedLauncherSource
+from checksmith.commands.registry import CommandFactory
 from checksmith.logs import LOGGER_NAME
+from checksmith.packages import UvPackage
+from checksmith.prerequisites import LocalProjectFiles, UvProjectPrerequisites
+from checksmith.processes import ProcessExecutor
 
 
 @pytest.fixture
@@ -43,7 +51,7 @@ def imported_modules() -> Callable[[str], frozenset[str]]:
 def restore_the_package_logger() -> Iterator[None]:
     """Put the ``checksmith`` logger back as every test found it.
 
-    ``configure_logging`` mutates process-global state, and the CLI calls it on
+    The logging configurator mutates process-global state, and the CLI calls it on
     every invocation. Without this, one test would decide what the next logs.
     """
     logger = logging.getLogger(LOGGER_NAME)
@@ -158,13 +166,26 @@ class FakeProcesses:
         )
 
 
-@pytest.fixture
-def processes(monkeypatch: pytest.MonkeyPatch) -> FakeProcesses:
-    """No test starts a real process; every test can see how one was asked for.
+def make_command_factory(executor: ProcessExecutor) -> CommandFactory:
+    project_files = LocalProjectFiles()
+    return CommandFactory(
+        executor=executor,
+        uv_prerequisites=UvProjectPrerequisites(
+            environment=os.environ, files=project_files
+        ),
+        import_linter_prerequisites=ImportLinterPrerequisites(files=project_files),
+        launcher_source=PackagedLauncherSource(
+            resource=files("checksmith.commands") / "_pytest_launcher.py"
+        ),
+        pytest_package=UvPackage(),
+    )
 
-    Without this, any test reaching :meth:`Command.run` would fetch a tool from
-    the network and run it --- slow, and answering differently on every machine.
-    """
-    fake = FakeProcesses()
-    monkeypatch.setattr("checksmith.commands.command.run_process", fake.run)
-    return fake
+
+@pytest.fixture
+def processes() -> FakeProcesses:
+    return FakeProcesses()
+
+
+@pytest.fixture
+def command_factory(processes: FakeProcesses) -> CommandFactory:
+    return make_command_factory(executor=processes)

@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from checksmith.config import Config, ConfigPath
+from checksmith.config import ConfigPath
+from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
 
 
 @pytest.fixture
@@ -24,7 +25,7 @@ def test_the_starter_resources_are_available(default_assets: Path) -> None:
 def test_the_starter_config_loads_through_the_real_loader(
     default_assets: Path,
 ) -> None:
-    config = Config.from_path(
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
         config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )
@@ -35,7 +36,7 @@ def test_the_starter_config_loads_through_the_real_loader(
 def test_the_starter_config_references_only_files_it_ships_with(
     default_assets: Path,
 ) -> None:
-    config = Config.from_path(
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
         config_file=default_assets / "checksmith.yaml",
         working_directory=default_assets,
     )

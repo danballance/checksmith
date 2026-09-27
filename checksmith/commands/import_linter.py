@@ -5,7 +5,7 @@ import stat
 import tomllib
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -13,6 +13,8 @@ from checksmith.commands.command import Command
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError, CheckPrerequisiteError
+from checksmith.prerequisites import ProjectFiles, UvPrerequisites
+from checksmith.processes import ProcessExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -33,31 +35,35 @@ class ImportLinterConfiguration(BaseModel):
     contracts: list[ImportLinterContract]
 
 
-class ImportLinterCommand(Command):
-    @property
-    def name(self) -> CommandName:
-        return CommandName.IMPORT_LINTER
+class ImportLinterEligibility(Protocol):
+    def is_runnable(self, *, check: Check, project_root: Path) -> bool: ...
 
-    def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
+
+class ImportLinterPrerequisites:
+    def __init__(self, files: ProjectFiles) -> None:
+        self._files = files
+
+    def is_runnable(self, *, check: Check, project_root: Path) -> bool:
         config_file = project_root / "pyproject.toml"
         self._validate_arguments(check=check, project_root=project_root)
         try:
-            root_mode = project_root.stat().st_mode
+            root_mode = self._files.stat(
+                path=project_root, follow_symlinks=True
+            ).st_mode
             if not stat.S_ISDIR(root_mode):
                 raise NotADirectoryError(
                     f"Project root is not a directory: {project_root}"
                 )
             try:
-                config_file.lstat()
+                self._files.stat(path=config_file, follow_symlinks=False)
             except FileNotFoundError:
                 logger.debug("%s is not runnable: %s is absent", check.id, config_file)
                 return False
-            with config_file.open("rb") as stream:
-                document = tomllib.load(stream)
+            document = self._files.read_toml(path=config_file)
         except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
             raise CheckPrerequisiteError(
                 check_id=check.id,
-                command=self.name,
+                command=CommandName.IMPORT_LINTER,
                 config_file=config_file,
                 problem=str(error),
             ) from error
@@ -71,7 +77,7 @@ class ImportLinterCommand(Command):
             if not isinstance(value, Mapping):
                 raise CheckPrerequisiteError(
                     check_id=check.id,
-                    command=self.name,
+                    command=CommandName.IMPORT_LINTER,
                     config_file=config_file,
                     problem=f"{location} must be a TOML table",
                 )
@@ -86,7 +92,7 @@ class ImportLinterCommand(Command):
         except ValidationError as error:
             raise CheckPrerequisiteError(
                 check_id=check.id,
-                command=self.name,
+                command=CommandName.IMPORT_LINTER,
                 config_file=config_file,
                 problem=(
                     "tool.importlinter.contracts must be a list of TOML tables:\n"
@@ -109,7 +115,7 @@ class ImportLinterCommand(Command):
         if not arguments or arguments[0] != "lint":
             raise CheckPrerequisiteError(
                 check_id=check.id,
-                command=self.name,
+                command=CommandName.IMPORT_LINTER,
                 config_file=config_file,
                 problem="Import Linter args must start with the 'lint' subcommand",
             )
@@ -126,7 +132,7 @@ class ImportLinterCommand(Command):
                 if index + 1 == len(arguments) or arguments[index + 1].startswith("-"):
                     raise CheckPrerequisiteError(
                         check_id=check.id,
-                        command=self.name,
+                        command=CommandName.IMPORT_LINTER,
                         config_file=config_file,
                         problem="--config requires a path to the project's pyproject.toml",
                     )
@@ -138,7 +144,7 @@ class ImportLinterCommand(Command):
         if len(config_arguments) != 1:
             raise CheckPrerequisiteError(
                 check_id=check.id,
-                command=self.name,
+                command=CommandName.IMPORT_LINTER,
                 config_file=config_file,
                 problem="Import Linter args must contain exactly one explicit --config",
             )
@@ -146,23 +152,41 @@ class ImportLinterCommand(Command):
         try:
             matching_path = os.path.abspath(configured_path) == os.path.abspath(
                 config_file
-            ) and configured_path.resolve(strict=False) == config_file.resolve(
-                strict=False
+            ) and self._files.resolve(path=configured_path) == self._files.resolve(
+                path=config_file
             )
         except (OSError, ValueError) as error:
             raise CheckPrerequisiteError(
                 check_id=check.id,
-                command=self.name,
+                command=CommandName.IMPORT_LINTER,
                 config_file=config_file,
                 problem=str(error),
             ) from error
         if not matching_path:
             raise CheckPrerequisiteError(
                 check_id=check.id,
-                command=self.name,
+                command=CommandName.IMPORT_LINTER,
                 config_file=config_file,
                 problem=f"--config must target the project's {config_file}",
             )
+
+
+class ImportLinterCommand(Command):
+    def __init__(
+        self,
+        executor: ProcessExecutor,
+        uv_prerequisites: UvPrerequisites,
+        prerequisites: ImportLinterEligibility,
+    ) -> None:
+        super().__init__(executor=executor, uv_prerequisites=uv_prerequisites)
+        self._prerequisites = prerequisites
+
+    @property
+    def name(self) -> CommandName:
+        return CommandName.IMPORT_LINTER
+
+    def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
+        return self._prerequisites.is_runnable(check=check, project_root=project_root)
 
     def process_response(
         self,

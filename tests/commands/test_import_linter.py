@@ -1,15 +1,20 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import BinaryIO, Final
+from typing import Final
 
 import pytest
 
-from checksmith.commands.import_linter import ImportLinterCommand
+from checksmith.commands.import_linter import (
+    ImportLinterCommand,
+    ImportLinterPrerequisites,
+)
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Argument, Check, ConfigPath
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError, CheckPrerequisiteError
-from tests.conftest import FakeProcesses
+from checksmith.prerequisites import LocalProjectFiles, UvProjectPrerequisites
+from tests.conftest import FakeProcesses, make_command_factory
 
 PROJECT_ROOT: Final = Path("/workspace/project")
 CONTRACTS: Final = """\
@@ -48,12 +53,16 @@ def import_linter_check(*, args: tuple[Argument, ...]) -> Check:
 
 
 def read_import_linter(*, stdout: str, stderr: str, exit_code: int) -> CheckResult:
-    return ImportLinterCommand().process_response(
-        check_id="dependencies",
-        project_root=PROJECT_ROOT,
-        exit_code=exit_code,
-        stdout=stdout,
-        stderr=stderr,
+    return (
+        make_command_factory(executor=FakeProcesses())
+        .for_name(name=CommandName.IMPORT_LINTER)
+        .process_response(
+            check_id="dependencies",
+            project_root=PROJECT_ROOT,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
     )
 
 
@@ -84,6 +93,7 @@ def test_importing_import_linter_does_not_load_other_command_implementations(
     ],
 )
 def test_absent_or_empty_contracts_make_import_linter_ineligible(
+    command_factory: CommandFactory,
     config: str | None,
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -92,7 +102,9 @@ def test_absent_or_empty_contracts_make_import_linter_ineligible(
         (tmp_path / "pyproject.toml").write_text(config, encoding="utf-8")
     caplog.set_level(logging.DEBUG, logger="checksmith.commands.import_linter")
 
-    runnable = ImportLinterCommand().check_is_runnable(
+    runnable = command_factory.for_name(
+        name=CommandName.IMPORT_LINTER
+    ).check_is_runnable(
         check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
         project_root=tmp_path,
     )
@@ -103,13 +115,14 @@ def test_absent_or_empty_contracts_make_import_linter_ineligible(
 
 @pytest.mark.parametrize("config", [CONTRACTS, "[[tool.importlinter.contracts]]"])
 def test_contract_tables_make_import_linter_eligible_without_validating_their_options(
+    command_factory: CommandFactory,
     config: str,
     tmp_path: Path,
 ) -> None:
     (tmp_path / "pyproject.toml").write_text(config, encoding="utf-8")
 
     assert (
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config=pyproject.toml")),
             project_root=tmp_path,
         )
@@ -130,6 +143,7 @@ def test_contract_tables_make_import_linter_eligible_without_validating_their_op
     ],
 )
 def test_malformed_configuration_shapes_are_prerequisite_errors(
+    command_factory: CommandFactory,
     config: str,
     tmp_path: Path,
 ) -> None:
@@ -137,7 +151,7 @@ def test_malformed_configuration_shapes_are_prerequisite_errors(
     path.write_text(config, encoding="utf-8")
 
     with pytest.raises(CheckPrerequisiteError) as raised:
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=tmp_path,
         )
@@ -150,13 +164,14 @@ def test_malformed_configuration_shapes_are_prerequisite_errors(
 
 @pytest.mark.parametrize("content", [b"[tool.importlinter", b"\xff"])
 def test_invalid_toml_or_encoding_is_a_prerequisite_error(
+    command_factory: CommandFactory,
     content: bytes,
     tmp_path: Path,
 ) -> None:
     (tmp_path / "pyproject.toml").write_bytes(content)
 
     with pytest.raises(CheckPrerequisiteError) as raised:
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=tmp_path,
         )
@@ -166,6 +181,7 @@ def test_invalid_toml_or_encoding_is_a_prerequisite_error(
 
 @pytest.mark.parametrize("exists_as_file", [True, False])
 def test_a_missing_or_non_directory_project_root_is_an_error(
+    command_factory: CommandFactory,
     exists_as_file: bool,
     tmp_path: Path,
 ) -> None:
@@ -174,51 +190,54 @@ def test_a_missing_or_non_directory_project_root_is_an_error(
         project_root.write_text("not a directory", encoding="utf-8")
 
     with pytest.raises(CheckPrerequisiteError):
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=project_root,
         )
 
 
-def test_a_pyproject_directory_is_an_error(tmp_path: Path) -> None:
+def test_a_pyproject_directory_is_an_error(
+    command_factory: CommandFactory, tmp_path: Path
+) -> None:
     (tmp_path / "pyproject.toml").mkdir()
 
     with pytest.raises(CheckPrerequisiteError, match="directory"):
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=tmp_path,
         )
 
 
-def test_a_dangling_pyproject_symlink_is_an_error(tmp_path: Path) -> None:
+def test_a_dangling_pyproject_symlink_is_an_error(
+    command_factory: CommandFactory, tmp_path: Path
+) -> None:
     (tmp_path / "pyproject.toml").symlink_to(tmp_path / "missing.toml")
 
     with pytest.raises(CheckPrerequisiteError):
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=tmp_path,
         )
 
 
-def test_an_unreadable_pyproject_is_an_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_an_unreadable_pyproject_is_an_error(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(CONTRACTS, encoding="utf-8")
 
-    def denied(self: Path, mode: str) -> BinaryIO:
-        raise PermissionError("Cannot read pyproject.toml")
+    class UnreadableFiles(LocalProjectFiles):
+        def read_toml(self, *, path: Path) -> Mapping[str, object]:
+            raise PermissionError("Cannot read pyproject.toml")
 
-    monkeypatch.setattr(Path, "open", denied)
+    prerequisites = ImportLinterPrerequisites(files=UnreadableFiles())
 
     with pytest.raises(CheckPrerequisiteError, match="Cannot read pyproject.toml"):
-        ImportLinterCommand().check_is_runnable(
+        prerequisites.is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=tmp_path,
         )
 
 
 def test_only_the_project_root_is_inspected(
+    command_factory: CommandFactory,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -229,7 +248,7 @@ def test_only_the_project_root_is_inspected(
     monkeypatch.chdir(tmp_path)
 
     assert (
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=project_root,
         )
@@ -256,11 +275,12 @@ def test_only_the_project_root_is_inspected(
     ],
 )
 def test_invalid_arguments_are_errors_even_without_a_pyproject(
+    command_factory: CommandFactory,
     args: tuple[str, ...],
     tmp_path: Path,
 ) -> None:
     with pytest.raises(CheckPrerequisiteError) as raised:
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=args),
             project_root=tmp_path,
         )
@@ -270,13 +290,14 @@ def test_invalid_arguments_are_errors_even_without_a_pyproject(
 
 @pytest.mark.parametrize("option", ["--contract", "--cache-dir"])
 def test_option_values_are_not_mistaken_for_additional_config_arguments(
+    command_factory: CommandFactory,
     option: str,
     tmp_path: Path,
 ) -> None:
     (tmp_path / "pyproject.toml").write_text(CONTRACTS, encoding="utf-8")
 
     assert (
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(
                 args=(
                     "lint",
@@ -293,6 +314,7 @@ def test_option_values_are_not_mistaken_for_additional_config_arguments(
 
 
 def test_a_lexically_matching_path_cannot_follow_a_symlink_to_another_config(
+    command_factory: CommandFactory,
     tmp_path: Path,
 ) -> None:
     project_root = tmp_path / "project"
@@ -305,7 +327,7 @@ def test_a_lexically_matching_path_cannot_follow_a_symlink_to_another_config(
     (project_root / "link").symlink_to(elsewhere / "child", target_is_directory=True)
 
     with pytest.raises(CheckPrerequisiteError, match="--config must target"):
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(
                 args=("lint", "--config", "link/../pyproject.toml")
             ),
@@ -313,21 +335,15 @@ def test_a_lexically_matching_path_cannot_follow_a_symlink_to_another_config(
         )
 
 
-def test_an_unresolvable_config_path_is_a_prerequisite_error(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    original_resolve = Path.resolve
-
-    def denied(self: Path, *, strict: bool) -> Path:
-        if self == tmp_path / "pyproject.toml":
+def test_an_unresolvable_config_path_is_a_prerequisite_error(tmp_path: Path) -> None:
+    class UnresolvableFiles(LocalProjectFiles):
+        def resolve(self, *, path: Path) -> Path:
             raise PermissionError("Cannot resolve pyproject.toml")
-        return original_resolve(self, strict=strict)
 
-    monkeypatch.setattr(Path, "resolve", denied)
+    prerequisites = ImportLinterPrerequisites(files=UnresolvableFiles())
 
     with pytest.raises(CheckPrerequisiteError, match="Cannot resolve pyproject.toml"):
-        ImportLinterCommand().check_is_runnable(
+        prerequisites.is_runnable(
             check=import_linter_check(args=("lint", "--config", "pyproject.toml")),
             project_root=tmp_path,
         )
@@ -336,6 +352,7 @@ def test_an_unresolvable_config_path_is_a_prerequisite_error(
 @pytest.mark.parametrize("joined", [False, True])
 @pytest.mark.parametrize("absolute", [False, True])
 def test_configuration_paths_are_normalized_against_the_project_root(
+    command_factory: CommandFactory,
     joined: bool,
     absolute: bool,
     tmp_path: Path,
@@ -350,7 +367,7 @@ def test_configuration_paths_are_normalized_against_the_project_root(
     args = ("lint", f"--config={path}") if joined else ("lint", "--config", path)
 
     assert (
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=args),
             project_root=project_root,
         )
@@ -358,7 +375,9 @@ def test_configuration_paths_are_normalized_against_the_project_root(
     )
 
 
-def test_a_config_path_argument_is_supported(tmp_path: Path) -> None:
+def test_a_config_path_argument_is_supported(
+    command_factory: CommandFactory, tmp_path: Path
+) -> None:
     (tmp_path / "pyproject.toml").write_text(CONTRACTS, encoding="utf-8")
     config_path = ConfigPath.model_validate(
         {"config_path": "../pyproject.toml"},
@@ -366,7 +385,7 @@ def test_a_config_path_argument_is_supported(tmp_path: Path) -> None:
     )
 
     assert (
-        ImportLinterCommand().check_is_runnable(
+        command_factory.for_name(name=CommandName.IMPORT_LINTER).check_is_runnable(
             check=import_linter_check(args=("lint", "--config", config_path)),
             project_root=tmp_path,
         )
@@ -468,6 +487,7 @@ def test_an_installation_failure_preserves_the_uvx_diagnostic() -> None:
 
 
 def test_import_linter_runs_through_uvx_with_unchanged_arguments(
+    command_factory: CommandFactory,
     processes: FakeProcesses,
 ) -> None:
     processes.stdout = "Contracts: 2 kept, 0 broken.\n"
@@ -475,7 +495,9 @@ def test_import_linter_runs_through_uvx_with_unchanged_arguments(
         args=("lint", "--config", "pyproject.toml", "--no-logo")
     )
 
-    result = ImportLinterCommand().run(check=check, project_root=PROJECT_ROOT)
+    result = command_factory.for_name(name=CommandName.IMPORT_LINTER).run(
+        check=check, project_root=PROJECT_ROOT
+    )
 
     assert processes.started[0].argv == (
         "uvx",
@@ -489,3 +511,27 @@ def test_import_linter_runs_through_uvx_with_unchanged_arguments(
     )
     assert processes.started[0].cwd == PROJECT_ROOT
     assert result.status is CheckStatus.PASSED
+
+
+def test_command_delegates_eligibility_without_starting_a_process(
+    processes: FakeProcesses,
+) -> None:
+    calls: list[tuple[Check, Path]] = []
+
+    class Eligibility:
+        def is_runnable(self, *, check: Check, project_root: Path) -> bool:
+            calls.append((check, project_root))
+            return False
+
+    check = import_linter_check(args=("lint", "--config", "pyproject.toml"))
+    command = ImportLinterCommand(
+        executor=processes,
+        uv_prerequisites=UvProjectPrerequisites(
+            environment={}, files=LocalProjectFiles()
+        ),
+        prerequisites=Eligibility(),
+    )
+
+    assert command.check_is_runnable(check=check, project_root=PROJECT_ROOT) is False
+    assert calls == [(check, PROJECT_ROOT)]
+    assert processes.started == []

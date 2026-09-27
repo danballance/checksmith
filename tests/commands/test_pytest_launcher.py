@@ -5,6 +5,7 @@ import sys
 from collections.abc import Callable, Iterator
 from importlib.machinery import ModuleSpec
 from importlib.resources import as_file, files
+from io import StringIO
 from pathlib import Path
 from typing import Protocol
 
@@ -12,9 +13,9 @@ import pytest
 from coverage import Coverage
 
 from checksmith.commands import _pytest_launcher
-from checksmith.commands.pytest import PytestCommand
-from checksmith.config import Config
-from checksmith.dtos import CheckStatus
+from checksmith.commands.registry import CommandFactory
+from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
+from checksmith.dtos import CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
 
@@ -30,7 +31,9 @@ def run_launcher(
     def run(args: list[str]) -> int:
         module_names = set(sys.modules)
         try:
-            return _pytest_launcher.main(
+            return _pytest_launcher.PytestLauncher(
+                invoke_pytest=pytest.main, error_stream=sys.stderr
+            ).run(
                 args=["-q", "--import-mode=importlib", "-p", "no:cacheprovider", *args]
             )
         finally:
@@ -44,7 +47,7 @@ def run_launcher(
 
 @pytest.mark.parametrize("exit_code", range(7))
 def test_known_pytest_exit_codes_are_distinct_from_uv_failures(
-    exit_code: int, monkeypatch: pytest.MonkeyPatch
+    exit_code: int,
 ) -> None:
     def fake_main(args: list[str], plugins: list[object]) -> int:
         assert args == ["tests", "-x"]
@@ -52,21 +55,24 @@ def test_known_pytest_exit_codes_are_distinct_from_uv_failures(
         assert isinstance(plugins[0], _pytest_launcher._ChecksmithPlugin)
         return exit_code
 
-    monkeypatch.setattr(_pytest_launcher.pytest, "main", fake_main)
+    launcher = _pytest_launcher.PytestLauncher(
+        invoke_pytest=fake_main, error_stream=StringIO()
+    )
 
-    assert _pytest_launcher.main(args=["tests", "-x"]) == 10 + exit_code
+    assert launcher.run(args=["tests", "-x"]) == 10 + exit_code
 
 
-def test_unknown_pytest_exit_code_is_an_execution_error(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_unknown_pytest_exit_code_is_an_execution_error() -> None:
     def fake_main(args: list[str], plugins: list[object]) -> int:
         return 42
 
-    monkeypatch.setattr(_pytest_launcher.pytest, "main", fake_main)
+    error_stream = StringIO()
+    launcher = _pytest_launcher.PytestLauncher(
+        invoke_pytest=fake_main, error_stream=error_stream
+    )
 
-    assert _pytest_launcher.main(args=["tests"]) == 2
-    assert "pytest returned an unexpected exit code: 42" in capsys.readouterr().err
+    assert launcher.run(args=["tests"]) == 2
+    assert "pytest returned an unexpected exit code: 42" in error_stream.getvalue()
 
 
 @pytest.mark.parametrize("target", ["tests", "./tests", "./nested/../tests"])
@@ -144,7 +150,9 @@ def test_continuing_after_collection_errors_preserves_error_status(
     assert "1 passed, 1 error" in stdout
 
 
-@pytest.mark.parametrize("args", [["custom"], ["tests::test_example"], ["tests", "other"]])
+@pytest.mark.parametrize(
+    "args", [["custom"], ["tests::test_example"], ["tests", "other"]]
+)
 def test_missing_custom_targets_keep_pytest_usage_errors(
     args: list[str], run_launcher: Callable[[list[str]], int]
 ) -> None:
@@ -243,7 +251,9 @@ def test_inaccessible_default_tests_path_is_an_error(
     assert "access denied" in capsys.readouterr().err
 
 
-def test_source_can_run_in_a_project_without_checksmith_installed(tmp_path: Path) -> None:
+def test_source_can_run_in_a_project_without_checksmith_installed(
+    tmp_path: Path,
+) -> None:
     launcher_path = Path(_pytest_launcher.__file__)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_example.py").write_text(
@@ -294,7 +304,7 @@ def run_coverage_launcher(
         }
     )
     with as_file(files("checksmith") / "assets" / "default") as assets:
-        config = Config.from_path(
+        config = ConfigLoader(source=LocalYamlConfigSource()).load(
             config_file=assets / "checksmith.yaml",
             working_directory=assets,
         )
@@ -338,6 +348,7 @@ def run_coverage_launcher(
     ],
 )
 def test_default_coverage_minimum_controls_the_check_result(
+    command_factory: CommandFactory,
     tmp_path: Path,
     run_coverage_launcher: CoverageLauncher,
     called_functions: int,
@@ -362,7 +373,7 @@ def test_default_coverage_minimum_controls_the_check_result(
     completed = run_coverage_launcher(extra_arguments=[], load_plugin=True)
 
     assert completed.returncode == exit_code, completed.stdout + completed.stderr
-    result = PytestCommand().process_response(
+    result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="pytest",
         project_root=tmp_path,
         exit_code=completed.returncode,
@@ -435,6 +446,7 @@ def test_collected_tests_without_measurable_source_fail_coverage(
 @pytest.mark.parametrize("tests_directory_exists", [False, True])
 @pytest.mark.parametrize("source_exists", [False, True])
 def test_empty_suites_are_exempt_from_the_default_coverage_minimum(
+    command_factory: CommandFactory,
     tmp_path: Path,
     run_coverage_launcher: CoverageLauncher,
     tests_directory_exists: bool,
@@ -448,7 +460,7 @@ def test_empty_suites_are_exempt_from_the_default_coverage_minimum(
     completed = run_coverage_launcher(extra_arguments=[], load_plugin=True)
 
     assert completed.returncode == 15, completed.stdout + completed.stderr
-    result = PytestCommand().process_response(
+    result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="pytest",
         project_root=tmp_path,
         exit_code=completed.returncode,
@@ -470,6 +482,7 @@ def test_empty_suites_are_exempt_from_the_default_coverage_minimum(
     ],
 )
 def test_coverage_setup_errors_are_not_exempted_for_missing_tests(
+    command_factory: CommandFactory,
     tmp_path: Path,
     run_coverage_launcher: CoverageLauncher,
     problem: str,
@@ -488,7 +501,7 @@ def test_coverage_setup_errors_are_not_exempted_for_missing_tests(
     )
 
     with pytest.raises(CheckOutputError, match=diagnostic):
-        PytestCommand().process_response(
+        command_factory.for_name(name=CommandName.PYTEST).process_response(
             check_id="pytest",
             project_root=tmp_path,
             exit_code=completed.returncode,
@@ -542,12 +555,34 @@ def test_broken_collection_is_not_an_empty_suite_with_coverage(
     ],
 )
 def test_coverage_config_paths_do_not_influence_pytest_project_discovery(
-    arguments: list[str], expected: list[str], monkeypatch: pytest.MonkeyPatch
+    arguments: list[str], expected: list[str]
 ) -> None:
     def fake_main(args: list[str], plugins: list[object]) -> int:
         assert args == expected
         return 0
 
-    monkeypatch.setattr(_pytest_launcher.pytest, "main", fake_main)
+    launcher = _pytest_launcher.PytestLauncher(
+        invoke_pytest=fake_main, error_stream=StringIO()
+    )
 
-    assert _pytest_launcher.main(args=arguments) == 10
+    assert launcher.run(args=arguments) == 10
+
+
+def test_reusing_a_launcher_creates_fresh_collection_state() -> None:
+    seen: list[_pytest_launcher._ChecksmithPlugin] = []
+
+    def invoke(args: list[str], plugins: list[object]) -> int:
+        plugin = plugins[0]
+        assert isinstance(plugin, _pytest_launcher._ChecksmithPlugin)
+        assert plugin.collection_failed is False
+        plugin.collection_failed = not seen
+        seen.append(plugin)
+        return 0
+
+    launcher = _pytest_launcher.PytestLauncher(
+        invoke_pytest=invoke, error_stream=StringIO()
+    )
+
+    assert launcher.run(args=["tests"]) == 12
+    assert launcher.run(args=["tests"]) == 10
+    assert seen[0] is not seen[1]

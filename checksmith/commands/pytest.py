@@ -1,23 +1,47 @@
-from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
+from typing import Protocol
 
 from checksmith.commands.command import Command
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
-from checksmith.packages import UvPackage
+from checksmith.packages import Package
+from checksmith.prerequisites import UvPrerequisites
+from checksmith.processes import ProcessExecutor
+
+
+class LauncherSource(Protocol):
+    def read(self) -> str: ...
+
+
+class PackagedLauncherSource:
+    def __init__(self, resource: Traversable) -> None:
+        self._resource = resource
+
+    def read(self) -> str:
+        return self._resource.read_text(encoding="utf-8")
 
 
 class PytestCommand(Command):
+    def __init__(
+        self,
+        executor: ProcessExecutor,
+        uv_prerequisites: UvPrerequisites,
+        source: LauncherSource,
+        package: Package,
+    ) -> None:
+        super().__init__(executor=executor, uv_prerequisites=uv_prerequisites)
+        self._source = source
+        self._package = package
+
     @property
     def name(self) -> CommandName:
         return CommandName.PYTEST
 
     def run(self, *, check: Check, project_root: Path) -> CheckResult:
-        source = (files("checksmith.commands") / "_pytest_launcher.py").read_text(
-            encoding="utf-8"
-        )
-        argv = UvPackage().build_argv(
+        source = self._source.read()
+        argv = self._package.build_argv(
             package=check.package,
             command="python",
             arguments=("-c", source, *check.arguments),

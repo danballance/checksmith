@@ -1,18 +1,22 @@
 """Typer command-line interface for Checksmith."""
 
 import logging
-from enum import StrEnum
+import os
 from importlib.resources import files
 from pathlib import Path
-from typing import Annotated, Any, Final, NoReturn
+from typing import Annotated, Any, Final
 
 import typer
 from rich.console import Console
+from rich.logging import RichHandler
 from typer.core import TyperGroup
 
 from checksmith import __version__
+from checksmith.checking import CheckService
+from checksmith.commands.import_linter import ImportLinterPrerequisites
+from checksmith.commands.pytest import PackagedLauncherSource
 from checksmith.commands.registry import CommandFactory
-from checksmith.config import Config
+from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
 from checksmith.dtos import ExitCode
 from checksmith.errors import ChecksmithError
 from checksmith.initialization import (
@@ -21,9 +25,11 @@ from checksmith.initialization import (
     PackagedAssetSource,
     YamlConfigRenderer,
 )
-from checksmith.logs import configure_logging
-from checksmith.outputs.base import CliOutput
-from checksmith.runner import Runner
+from checksmith.logs import LOGGER_NAME, LoggingConfigurator
+from checksmith.packages import UvPackage
+from checksmith.prerequisites import LocalProjectFiles, UvProjectPrerequisites
+from checksmith.presentation import OutputFormat, OutputPresenter
+from checksmith.processes import LocalProcessRuntime, SubprocessExecutor
 
 HELP_OPTION_NAMES = ["-h", "--help"]
 CONTEXT_SETTINGS = {"help_option_names": HELP_OPTION_NAMES}
@@ -32,13 +38,6 @@ DEBUG_FLAGS: Final = ("--debug", "-d")
 """Spellings of the debug switch, which may appear anywhere on the line."""
 
 logger = logging.getLogger(__name__)
-
-
-class OutputFormat(StrEnum):
-    """Rendering format for a command's output."""
-
-    TEXT = "text"
-    JSON = "json"
 
 
 FormatOption = Annotated[
@@ -80,18 +79,6 @@ DebugOption = Annotated[
     typer.Option(*DEBUG_FLAGS, help="Write debug logging to stderr."),
 ]
 
-console = Console()
-
-
-def _emit(output: CliOutput, fmt: OutputFormat) -> NoReturn:
-    """Render an operation's output and exit with the code it implies."""
-    if fmt is OutputFormat.JSON:
-        # Plain echo: Rich would add markup interpretation and line wrapping.
-        typer.echo(output.model_dump_json(indent=2))
-    else:
-        console.print(output)
-    raise typer.Exit(output.exit_code)
-
 
 class ChecksmithGroup(TyperGroup):
     """The root group: takes the debug switch anywhere, and owns the error boundary."""
@@ -123,119 +110,147 @@ class ChecksmithGroup(TyperGroup):
             raise typer.Exit(ExitCode.ERROR) from error
 
 
-app = typer.Typer(
-    name="checksmith",
-    cls=ChecksmithGroup,
-    help="Manage coding-agent integrations and enforce deterministic quality gates when an agent finishes.",
-    context_settings=CONTEXT_SETTINGS,
-    no_args_is_help=True,
-    add_completion=False,
-)
+class CliApplication:
+    def __init__(
+        self,
+        checks: CheckService,
+        initializer: Initializer,
+        presenter: OutputPresenter,
+        logging: LoggingConfigurator,
+    ) -> None:
+        self._checks = checks
+        self._initializer = initializer
+        self._presenter = presenter
+        self._logging = logging
 
-agents_app = typer.Typer(
-    name="agents",
-    help="Manage integrations with supported coding agents.",
-    context_settings=CONTEXT_SETTINGS,
-    no_args_is_help=True,
-)
+    def build(self) -> typer.Typer:
+        application = typer.Typer(
+            name="checksmith",
+            cls=ChecksmithGroup,
+            help="Manage coding-agent integrations and enforce deterministic quality gates when an agent finishes.",
+            context_settings=CONTEXT_SETTINGS,
+            no_args_is_help=True,
+            add_completion=False,
+        )
+        agents = typer.Typer(
+            name="agents",
+            help="Manage integrations with supported coding agents.",
+            context_settings=CONTEXT_SETTINGS,
+            no_args_is_help=True,
+        )
+        agents.command("install")(self.agents_install)
+        agents.command("uninstall")(self.agents_uninstall)
+        application.add_typer(agents)
+        application.callback()(self.main)
+        application.command("init")(self.init)
+        application.command("check")(self.check)
+        return application
 
-app.add_typer(agents_app)
+    @staticmethod
+    def _version_callback(value: bool) -> None:
+        if value:
+            typer.echo(f"checksmith {__version__}")
+            raise typer.Exit(ExitCode.SUCCESS)
+
+    def main(
+        self,
+        version: Annotated[
+            bool,
+            typer.Option(
+                "--version",
+                help="Show the installed Checksmith version.",
+                callback=_version_callback,
+                is_eager=True,
+            ),
+        ] = False,
+        debug: DebugOption = False,
+    ) -> None:
+        """Manage coding-agent integrations and enforce project checks."""
+        self._logging.configure(debug=debug)
+
+    def agents_install(self) -> None:
+        """Register integrations with selected coding agents.
+
+        Operation id: ``agents.install``. Output kind: ``AgentsInstall``.
+        """
+        raise NotImplementedError
+
+    def agents_uninstall(self) -> None:
+        """Remove integrations from selected coding agents.
+
+        Operation id: ``agents.uninstall``. Output kind: ``AgentsUninstall``.
+        """
+        raise NotImplementedError
+
+    def init(self, project_root: ProjectRootOption = None) -> None:
+        """Create the bundled configuration files in the current directory.
+
+        Operation id: ``init``. Output kind: ``Init``.
+        """
+        destination = Path.cwd()
+        if project_root is None:
+            project_root = Path(typer.prompt("Project root", default=str(destination)))
+        self._presenter.emit(
+            self._initializer.initialize(
+                destination=destination, project_root=project_root
+            ),
+            OutputFormat.TEXT,
+        )
+
+    def check(
+        self,
+        config_file: ConfigOption,
+        fmt: FormatOption = OutputFormat.TEXT,
+        check_id: CheckOption = None,
+    ) -> None:
+        """Execute the project's configured checks and report their results."""
+        self._presenter.emit(
+            self._checks.check(
+                config_file=config_file,
+                working_directory=Path.cwd(),
+                check_id=check_id,
+            ),
+            fmt,
+        )
 
 
-def _version_callback(value: bool) -> None:
-    if value:
-        typer.echo(f"checksmith {__version__}")
-        raise typer.Exit(ExitCode.SUCCESS)
-
-
-@app.callback()
-def main(
-    version: Annotated[
-        bool,
-        typer.Option(
-            "--version",
-            help="Show the installed Checksmith version.",
-            callback=_version_callback,
-            is_eager=True,
+app = CliApplication(
+    checks=CheckService(
+        loader=ConfigLoader(source=LocalYamlConfigSource()),
+        commands=CommandFactory(
+            executor=SubprocessExecutor(runtime=LocalProcessRuntime()),
+            uv_prerequisites=UvProjectPrerequisites(
+                environment=os.environ, files=LocalProjectFiles()
+            ),
+            import_linter_prerequisites=ImportLinterPrerequisites(
+                files=LocalProjectFiles()
+            ),
+            launcher_source=PackagedLauncherSource(
+                resource=files("checksmith.commands") / "_pytest_launcher.py"
+            ),
+            pytest_package=UvPackage(),
         ),
-    ] = False,
-    debug: DebugOption = False,
-) -> None:
-    """Manage coding-agent integrations and enforce project checks.
-
-    Runs before every command body, so ``--debug`` covers all of them. The
-    switch may be given anywhere on the line: ``checksmith --debug check ...``
-    and ``checksmith check ... --debug`` mean the same thing.
-    """
-    configure_logging(debug=debug)
-
-
-@agents_app.command("install")
-def agents_install() -> None:
-    """Register integrations with selected coding agents.
-
-    Operation id: ``agents.install``. Output kind: ``AgentsInstall``.
-    """
-    raise NotImplementedError
-
-
-@agents_app.command("uninstall")
-def agents_uninstall() -> None:
-    """Remove integrations from selected coding agents.
-
-    Operation id: ``agents.uninstall``. Output kind: ``AgentsUninstall``.
-    """
-    raise NotImplementedError
-
-
-@app.command("init")
-def init(project_root: ProjectRootOption = None) -> None:
-    """Create the bundled configuration files in the current directory.
-
-    Operation id: ``init``. Output kind: ``Init``.
-    """
-    destination = Path.cwd()
-    if project_root is None:
-        project_root = Path(typer.prompt("Project root", default=str(destination)))
-    initializer = Initializer(
-        assets=PackagedAssetSource(directory=files("checksmith") / "assets" / "default"),
+    ),
+    initializer=Initializer(
+        assets=PackagedAssetSource(
+            directory=files("checksmith") / "assets" / "default"
+        ),
         renderer=YamlConfigRenderer(),
         filesystem=LocalInitializationFilesystem(),
-    )
-    _emit(
-        initializer.initialize(destination=destination, project_root=project_root),
-        OutputFormat.TEXT,
-    )
-
-
-def _runner_from_config(config_file: Path, check_id: str | None) -> Runner:
-    config = Config.from_path(
-        config_file=config_file,
-        working_directory=Path.cwd(),
-    )
-    checks = config.checks
-    if check_id is not None:
-        checks = tuple(check for check in checks if check.id == check_id)
-        if not checks:
-            available = ", ".join(repr(check.id) for check in config.checks)
-            raise ChecksmithError(
-                f"Unknown check ID {check_id!r}. Available check IDs: {available}."
-            )
-    return Runner(
-        checks=checks,
-        commands=CommandFactory.registry(),
-        project_root=config.project_root,
-    )
-
-
-@app.command("check")
-def check(
-    config_file: ConfigOption,
-    fmt: FormatOption = OutputFormat.TEXT,
-    check_id: CheckOption = None,
-) -> None:
-    """Execute the project's configured checks and report their results."""
-    _emit(_runner_from_config(config_file=config_file, check_id=check_id).check(), fmt)
+    ),
+    presenter=OutputPresenter(console=Console()),
+    logging=LoggingConfigurator(
+        logger=logging.getLogger(LOGGER_NAME),
+        handler=RichHandler(
+            console=Console(stderr=True),
+            show_time=True,
+            show_level=True,
+            show_path=True,
+            rich_tracebacks=True,
+            markup=False,
+        ),
+    ),
+).build()
 
 
 if __name__ == "__main__":

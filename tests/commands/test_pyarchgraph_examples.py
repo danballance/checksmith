@@ -8,10 +8,10 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel
 
-from checksmith.commands.pyarchgraph import PyArchGraphCommand
 from checksmith.config import Check
 from checksmith.dtos import CheckStatus, CommandName, PackageType
 from checksmith.runner import Runner
+from tests.conftest import FakeProcesses, make_command_factory
 
 
 class ExpectedOutcome(BaseModel):
@@ -67,7 +67,6 @@ def test_every_project_and_variant_is_selected() -> None:
 def test_real_cli_examples_produce_expected_checksmith_results(
     project_id: str,
     example: ExampleRun,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = PRODUCER / "examples" / "projects" / project_id / example.source_root
     arguments = [str(source)]
@@ -97,16 +96,11 @@ def test_real_cli_examples_produce_expected_checksmith_results(
     )
     assert completed.returncode == example.expected.exit_code, completed.stderr
 
-    def actual_response(
-        *,
-        check_id: str,
-        argv: tuple[str, ...],
-        cwd: Path,
-        heartbeat_interval_seconds: float,
-    ) -> subprocess.CompletedProcess[str]:
-        return completed
-
-    monkeypatch.setattr("checksmith.commands.command.run_process", actual_response)
+    processes = FakeProcesses()
+    processes.exit_code = completed.returncode
+    processes.stdout = completed.stdout
+    processes.stderr = completed.stderr
+    command_factory = make_command_factory(executor=processes)
     check = Check(
         id=f"{project_id}/{example.id}",
         package_type=PackageType.UVX,
@@ -116,7 +110,7 @@ def test_real_cli_examples_produce_expected_checksmith_results(
     )
     output = Runner(
         checks=(check,),
-        commands={CommandName.PYARCHGRAPH: PyArchGraphCommand()},
+        commands=command_factory.registry(),
         project_root=PRODUCER,
     ).check()
 

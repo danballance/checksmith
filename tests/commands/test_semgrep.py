@@ -7,11 +7,11 @@ from typing import Final
 
 import pytest
 
-from checksmith.commands.semgrep import SemgrepCommand
+from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckOutputError
-from tests.conftest import FakeProcesses
+from tests.conftest import FakeProcesses, make_command_factory
 
 PROJECT_ROOT = Path("/workspace/project")
 
@@ -58,12 +58,16 @@ SEMGREP_REPORT: Final = """\
 
 
 def read_semgrep(*, stdout: str, exit_code: int, stderr: str) -> CheckResult:
-    return SemgrepCommand().process_response(
-        check_id="function-style",
-        project_root=PROJECT_ROOT,
-        exit_code=exit_code,
-        stdout=stdout,
-        stderr=stderr,
+    return (
+        make_command_factory(executor=FakeProcesses())
+        .for_name(name=CommandName.SEMGREP)
+        .process_response(
+            check_id="function-style",
+            project_root=PROJECT_ROOT,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
     )
 
 
@@ -208,6 +212,7 @@ def test_a_semgrep_installation_failure_keeps_the_uvx_diagnostic() -> None:
 
 def test_semgrep_runs_through_uvx_with_the_configured_arguments(
     processes: FakeProcesses,
+    command_factory: CommandFactory,
 ) -> None:
     processes.stdout = '{"results": [], "errors": []}'
     check = Check(
@@ -218,7 +223,9 @@ def test_semgrep_runs_through_uvx_with_the_configured_arguments(
         args=("scan", "--config", ".checksmith/semgrep.yaml", "--json", "."),
     )
 
-    result = SemgrepCommand().run(check=check, project_root=PROJECT_ROOT)
+    result = command_factory.for_name(name=CommandName.SEMGREP).run(
+        check=check, project_root=PROJECT_ROOT
+    )
 
     assert processes.started[0].argv == (
         "uvx",
@@ -232,4 +239,6 @@ def test_semgrep_runs_through_uvx_with_the_configured_arguments(
         ".",
     )
     assert processes.started[0].cwd == PROJECT_ROOT
-    assert result == CheckResult(check_id="function-style", status=CheckStatus.PASSED, messages=())
+    assert result == CheckResult(
+        check_id="function-style", status=CheckStatus.PASSED, messages=()
+    )

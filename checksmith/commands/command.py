@@ -1,22 +1,18 @@
 """One command: how it is run, and how the program's own output is read."""
 
 import logging
-import os
 import shlex
-import tomllib
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
 from pathlib import Path
-from stat import S_ISREG
 
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CommandName, PackageType
 from checksmith.errors import (
     CheckExecutionError,
     CheckOutputError,
-    CheckPrerequisiteError,
 )
-from checksmith.processes import run_process
+from checksmith.prerequisites import UvPrerequisites
+from checksmith.processes import ProcessExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -28,11 +24,17 @@ class Command(ABC):
     common with reading Prettier's. What they all share --- starting a process,
     and reporting under the id of the check that asked for it --- lives here.
 
-    Implementations are stateless, so one shared instance per command is enough:
-    a check is a configuration of a command, not a command of its own. Two
+    Implementations keep no per-check state, so one shared instance per command
+    is enough: a check is a configuration of a command, not a command of its own. Two
     checks naming ``ruff`` are two configurations handled by the one
     :class:`RuffCommand`.
     """
+
+    def __init__(
+        self, executor: ProcessExecutor, uv_prerequisites: UvPrerequisites
+    ) -> None:
+        self._executor = executor
+        self._uv_prerequisites = uv_prerequisites
 
     @property
     @abstractmethod
@@ -65,11 +67,11 @@ class Command(ABC):
         argv: tuple[str, ...],
     ) -> CheckResult:
         if check.package_type is PackageType.UV:
-            self._require_uv_project(check=check, project_root=project_root)
+            self._uv_prerequisites.validate(check=check, project_root=project_root)
         logger.debug("%s argv=%s cwd=%s", check.id, argv, project_root)
         logger.debug("%s command=%s cwd=%s", check.id, shlex.join(argv), project_root)
         try:
-            completed = run_process(
+            completed = self._executor.run(
                 check_id=check.id,
                 argv=argv,
                 cwd=project_root,
@@ -105,58 +107,6 @@ class Command(ABC):
             stderr=completed.stderr,
         )
 
-    def _require_uv_project(self, *, check: Check, project_root: Path) -> None:
-        for variable in ("UV_PROJECT", "UV_WORKING_DIR"):
-            if os.environ.get(variable):
-                raise CheckPrerequisiteError(
-                    check_id=check.id,
-                    command=self.name,
-                    config_file=project_root / "pyproject.toml",
-                    problem=(
-                        f"Unset {variable}; Checksmith uses project_root "
-                        "to select the uv project and working directory"
-                    ),
-                )
-        no_sync = os.environ.get("UV_NO_SYNC")
-        if no_sync is not None and no_sync.lower() not in {"0", "false", "no", "off"}:
-            raise CheckPrerequisiteError(
-                check_id=check.id,
-                command=self.name,
-                config_file=project_root / "pyproject.toml",
-                problem="UV_NO_SYNC must be unset or false for locked uv execution",
-            )
-        for filename in ("pyproject.toml", "uv.lock"):
-            config_file = project_root / filename
-            try:
-                if not S_ISREG(config_file.stat().st_mode):
-                    raise OSError(f"Expected a regular file: {config_file}")
-                with config_file.open("rb") as stream:
-                    if filename == "pyproject.toml":
-                        try:
-                            document: Mapping[str, object] = tomllib.load(stream)
-                        except (tomllib.TOMLDecodeError, UnicodeDecodeError) as error:
-                            raise ValueError(
-                                f"invalid pyproject.toml: {error}"
-                            ) from error
-                        tool = document.get("tool")
-                        uv = tool.get("uv") if isinstance(tool, Mapping) else None
-                        if isinstance(uv, Mapping) and uv.get("managed") is False:
-                            raise ValueError(
-                                "uv execution requires tool.uv.managed=true"
-                            )
-                    else:
-                        stream.read(1)
-            except (OSError, ValueError) as error:
-                raise CheckPrerequisiteError(
-                    check_id=check.id,
-                    command=self.name,
-                    config_file=config_file,
-                    problem=(
-                        "uv execution requires readable pyproject.toml and uv.lock "
-                        f"files in the project root: {error}"
-                    ),
-                ) from error
-
     @abstractmethod
     def process_response(
         self,
@@ -173,7 +123,7 @@ class Command(ABC):
         and they are passed separately rather than as one object so that a test
         can exercise a program's real output without starting anything. The
         check's id comes with them because the result is reported under it and
-        the command itself holds no state.
+        the command itself holds no per-check state.
 
         The project root comes too, because a tool reporting absolute paths has
         to be read against something for a finding to be worth showing.
