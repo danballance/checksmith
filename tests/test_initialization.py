@@ -9,6 +9,7 @@ from pydantic import BaseModel, ValidationError
 from astcheck.domain.configuration import AnalysisPolicy, PluginConfiguration
 from checksmith.config import Config, ConfigPath
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
+from checksmith.dtos import CommandName
 from checksmith.errors import ChecksmithError
 from checksmith.initialization import (
     Initializer,
@@ -503,6 +504,47 @@ def test_generated_config_resolves_the_root_and_companion_files(
         destination / name for name in FILE_NAMES if name != "checksmith.yaml"
     }
     assert all(path.is_file() for path in referenced_files)
+    assert not tuple(project_root.iterdir())
+
+
+def test_generated_config_preserves_explicit_complexipy_defaults(
+    initializer: Initializer,
+    destination: Path,
+    project_root: Path,
+    tmp_path: Path,
+) -> None:
+    initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=project_root,
+    )
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
+        config_file=destination / "checksmith.yaml",
+        working_directory=tmp_path,
+    )
+    complexity = next(
+        check for check in config.checks if check.command is CommandName.COMPLEXIPY
+    )
+
+    assert complexity.id == "complexipy"
+    assert complexity.package == "complexipy==8.0.1"
+    assert complexity.arguments == (
+        "--plain",
+        "--failed",
+        "--max-complexity-allowed",
+        "10",
+        "--exclude",
+        "tests/**",
+        "--color",
+        "no",
+        "--snapshot-ignore",
+        "--snapshot-create=false",
+        "--ignore-complexity=false",
+        "--report-ignored=false",
+        ".",
+    )
+    assert config.project_root == project_root
+    assert {path.name for path in destination.iterdir()} == set(FILE_NAMES)
     assert not tuple(project_root.iterdir())
 
 

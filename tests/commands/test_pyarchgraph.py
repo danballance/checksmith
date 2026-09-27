@@ -21,6 +21,9 @@ def evidence() -> dict[str, JsonValue]:
         "column": 1,
         "source_segment": "import service",
         "resolution_kind": "exact_module",
+        "source": "app",
+        "target": "service",
+        "fact_id": "app-import-service",
         "context": {
             "scope": "module",
             "in_function": False,
@@ -54,6 +57,9 @@ def cycle_finding(certainty: Literal["definite", "possible"]) -> dict[str, JsonV
                         **evidence(),
                         "path": "src/service.py",
                         "source_segment": "import app",
+                        "source": "service",
+                        "target": "app",
+                        "fact_id": "service-import-app",
                     }
                 ],
             },
@@ -65,6 +71,7 @@ def import_finding() -> dict[str, JsonValue]:
     return {
         "kind": "unresolved_import",
         "source": "app",
+        "node": "app",
         "requested": None,
         "code": "missing_internal_target",
         "message": "Import needs review",
@@ -73,21 +80,45 @@ def import_finding() -> dict[str, JsonValue]:
                 **evidence(),
                 "resolution_kind": None,
                 "source_segment": None,
+                "target": None,
             }
         ],
     }
 
 
+def registered_finding(
+    *, finding: JsonValue, check_id: str, severity: Literal["error", "warning", "info"]
+) -> dict[str, JsonValue]:
+    return {"check_id": check_id, "severity": severity, "finding": finding}
+
+
 def report_json(*, findings: list[JsonValue]) -> str:
     view = {
+        "nodes": [
+            {"id": name, "label": name, "members": [name]}
+            for name in ("app", "service")
+        ],
+        "enabled_check_ids": ["cycles", "unresolved-imports"],
         "dependency_count": 2,
-        "cyclic_source_count": 2 if findings else 0,
+        "cyclic_node_count": 2 if findings else 0,
         "cyclic_dependency_count": 2 if findings else 0,
-        "findings": findings,
+        "findings": [
+            registered_finding(
+                finding=finding,
+                check_id=(
+                    "unresolved-imports"
+                    if isinstance(finding, dict)
+                    and finding.get("kind") == "unresolved_import"
+                    else "cycles"
+                ),
+                severity="error",
+            )
+            for finding in findings
+        ],
     }
     return json.dumps(
         {
-            "schema_version": "0.6",
+            "schema_version": "0.7",
             "status": "complete",
             "gate": "structural",
             "sources": [
@@ -111,7 +142,7 @@ def report_json(*, findings: list[JsonValue]) -> str:
                 "boundaries": [],
                 "limitations": ["Only explicit import statements are analyzed."],
             },
-            "views": {"structural": view, "non_typing": view, "module_body": view},
+            "views": {"structural": view, "non-typing": view, "module-body": view},
         }
     )
 
@@ -119,10 +150,45 @@ def report_json(*, findings: list[JsonValue]) -> str:
 HEALTHY_REPORT = report_json(findings=[])
 HEALTHY_MESSAGES = (
     "Analysis is complete; gate: structural; sources: 2; analyzed: 2.",
-    "Selected view (structural): dependencies: 2; cyclic sources: 0; findings: 0.",
-    "Informational view (non-typing): dependencies: 2; cyclic sources: 0; findings: 0.",
-    "Informational view (module-body): dependencies: 2; cyclic sources: 0; findings: 0.",
+    "Selected view (structural): dependencies: 2; cyclic nodes: 0; findings: 0.",
+    "Informational view (module-body): dependencies: 2; cyclic nodes: 0; findings: 0.",
+    "Informational view (non-typing): dependencies: 2; cyclic nodes: 0; findings: 0.",
 )
+
+
+def custom_report_json(*, severity: Literal["error", "warning", "info"]) -> str:
+    payload = json.loads(HEALTHY_REPORT)
+    payload["gate"] = "packages"
+    payload["views"] = {
+        "packages": {
+            "nodes": [
+                {
+                    "id": "application",
+                    "label": "Application package",
+                    "members": ["app", "service"],
+                }
+            ],
+            "enabled_check_ids": ["group-size"],
+            "dependency_count": 0,
+            "cyclic_dependency_count": 0,
+            "cyclic_node_count": 0,
+            "findings": [
+                registered_finding(
+                    check_id="group-size",
+                    severity=severity,
+                    finding={
+                        "kind": "rule",
+                        "code": "large-group",
+                        "message": "Consider a smaller package",
+                        "node_ids": ["application"],
+                        "source_ids": ["app"],
+                        "evidence": [evidence()],
+                    },
+                )
+            ],
+        }
+    }
+    return json.dumps(payload)
 
 
 def partial_report_json(*, findings: list[JsonValue]) -> str:
@@ -172,7 +238,7 @@ def test_command_uses_normal_subprocess_execution(
 @pytest.mark.parametrize(
     ("finding", "message"),
     [
-        (cycle_finding("definite"), "Definite cyclic sources: app, service"),
+        (cycle_finding("definite"), "Definite cyclic nodes: app, service"),
         (cycle_finding("possible"), "Possible dependency cycle among app, service"),
         (
             import_finding(),
@@ -276,7 +342,7 @@ def test_stdout_must_be_a_complete_json_report(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("schema_version", "0.5"),
+        ("schema_version", "0.6"),
         ("status", "partial"),
         ("gate", "non_typing"),
         ("sources", {}),
@@ -290,7 +356,7 @@ def test_report_schema_is_strict(
 ) -> None:
     payload = json.loads(HEALTHY_REPORT)
     payload[field] = value
-    with pytest.raises(CheckOutputError, match="schema 0.6"):
+    with pytest.raises(CheckOutputError, match="schema 0.7"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -311,7 +377,6 @@ def test_report_schema_is_strict(
         {**cycle_finding("definite"), "dependencies": []},
         {**cycle_finding("definite"), "kind": "forbidden_dependency"},
         {**import_finding(), "kind": "dynamic_import"},
-        {**import_finding(), "evidence": []},
         {**import_finding(), "evidence": [{**evidence(), "line": 0}]},
         {
             **import_finding(),
@@ -331,7 +396,7 @@ def test_report_schema_is_strict(
 def test_malformed_findings_are_errors(
     finding: JsonValue, tmp_path: Path, command_factory: CommandFactory
 ) -> None:
-    with pytest.raises(CheckOutputError, match="schema 0.6"):
+    with pytest.raises(CheckOutputError, match="schema 0.7"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -339,6 +404,36 @@ def test_malformed_findings_are_errors(
             stdout=report_json(findings=[finding]),
             stderr="",
         )
+
+
+@pytest.mark.parametrize(
+    ("severity", "exit_code", "status"),
+    [("warning", 0, CheckStatus.PASSED), ("error", 1, CheckStatus.FAILED)],
+)
+def test_import_findings_can_omit_evidence(
+    severity: str,
+    exit_code: int,
+    status: CheckStatus,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(report_json(findings=[{**import_finding(), "evidence": []}]))
+    for view in payload["views"].values():
+        view["findings"][0]["severity"] = severity
+
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=exit_code,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    assert result.status is status
+    assert result.messages[-1] == (
+        f"{severity.capitalize()} [unresolved-imports]: "
+        "Unresolved import in app: Import needs review [missing_internal_target]."
+    )
 
 
 def test_mixed_component_does_not_overstate_possible_members(
@@ -353,6 +448,8 @@ def test_mixed_component_does_not_overstate_possible_members(
         {**payload["sources"][0], "id": "plugin", "import_name": "plugin"}
     )
     payload["coverage"]["analyzed_source_count"] = 3
+    for view in payload["views"].values():
+        view["nodes"].append({"id": "plugin", "label": "plugin", "members": ["plugin"]})
     result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
         check_id="architecture",
         project_root=tmp_path,
@@ -363,8 +460,8 @@ def test_mixed_component_does_not_overstate_possible_members(
 
     assert result.status is CheckStatus.FAILED
     message = result.messages[-1]
-    assert message.startswith("Definite cyclic sources: app, service.")
-    assert "Other component members with possible cycle involvement: plugin." in message
+    assert message.startswith("Error [cycles]: Definite cyclic nodes: app, service.")
+    assert "Other component nodes with possible cycle involvement: plugin." in message
     assert "Witness: app -> service at src/app.py:3:1" in message
     assert "service -> app at src/service.py:3:1" in message
 
@@ -385,9 +482,11 @@ def test_only_selected_view_controls_gate(
 ) -> None:
     payload = json.loads(report_json(findings=[cycle_finding("definite")]))
     payload["gate"] = gate
-    payload["views"]["module_body"] = {
+    payload["views"]["module-body"] = {
+        "nodes": payload["views"]["module-body"]["nodes"],
+        "enabled_check_ids": ["cycles", "unresolved-imports"],
         "dependency_count": 0,
-        "cyclic_source_count": 0,
+        "cyclic_node_count": 0,
         "cyclic_dependency_count": 0,
         "findings": [],
     }
@@ -403,13 +502,15 @@ def test_only_selected_view_controls_gate(
     if status is CheckStatus.PASSED:
         assert result.messages == (
             "Analysis is complete; gate: module-body; sources: 2; analyzed: 2.",
-            "Selected view (module-body): dependencies: 0; cyclic sources: 0; findings: 0.",
-            "Informational view (structural): dependencies: 2; cyclic sources: 2; findings: 1.",
-            "Informational view (non-typing): dependencies: 2; cyclic sources: 2; findings: 1.",
+            "Selected view (module-body): dependencies: 0; cyclic nodes: 0; findings: 0.",
+            "Informational view (non-typing): dependencies: 2; cyclic nodes: 2; findings: 1.",
+            "Informational view (structural): dependencies: 2; cyclic nodes: 2; findings: 1.",
         )
     else:
         assert result.messages[1].startswith(f"Selected view ({gate})")
-        assert all(message.startswith("Informational view") for message in result.messages[2:4])
+        assert all(
+            message.startswith("Informational view") for message in result.messages[2:4]
+        )
 
 
 @pytest.mark.parametrize("findings", [[], [cycle_finding("definite")]])
@@ -426,11 +527,15 @@ def test_partial_report_preserves_findings_and_coverage_as_error(
     assert result.status is CheckStatus.ERROR
     assert "analyzed: 1" in result.messages[0]
     assert result.messages[0].startswith("Analysis is incomplete")
-    assert result.messages[4].startswith("src/broken.py:4:2: Error [source_syntax_error]")
+    assert result.messages[4].startswith(
+        "src/broken.py:4:2: Error [source_syntax_error]"
+    )
     assert any("Witness:" in message for message in result.messages) == bool(findings)
     assert len(result.messages) == 5 + len(findings)
     if findings:
-        assert result.messages[-1].startswith("Partial observation: Definite cyclic sources")
+        assert result.messages[-1].startswith(
+            "Partial observation: Error [cycles]: Definite cyclic nodes"
+        )
 
 
 @pytest.mark.parametrize(
@@ -563,9 +668,9 @@ def test_context_and_full_component_details_are_accepted(
         ("coverage", "analyzed_source_count", "2"),
         ("coverage", "analyzed_source_count", -1),
         ("coverage", "unexpected", 1),
-        ("module_body", "dependency_count", 1.5),
-        ("module_body", "cyclic_source_count", -1),
-        ("non_typing", "findings", {}),
+        ("module-body", "dependency_count", 1.5),
+        ("module-body", "cyclic_node_count", -1),
+        ("non-typing", "findings", {}),
         ("structural", "unexpected", None),
     ],
 )
@@ -579,7 +684,7 @@ def test_nested_schema_and_unselected_views_are_strict(
     payload = json.loads(HEALTHY_REPORT)
     target = payload["coverage"] if section == "coverage" else payload["views"][section]
     target[field] = value
-    with pytest.raises(CheckOutputError, match="schema 0.6"):
+    with pytest.raises(CheckOutputError, match="schema 0.7"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -593,6 +698,9 @@ def test_partial_report_can_have_no_sources() -> None:
     payload = json.loads(partial_report_json(findings=[]))
     payload["sources"] = []
     payload["coverage"]["analyzed_source_count"] = 0
+    for view in payload["views"].values():
+        view["nodes"] = []
+        view["dependency_count"] = 0
     report = PyArchGraphReport.model_validate_json(json.dumps(payload))
     assert report.sources == ()
     assert report.status == "incomplete"
@@ -604,7 +712,9 @@ def test_complete_report_rejects_unanalyzed_sources(
 ) -> None:
     payload = json.loads(HEALTHY_REPORT)
     payload["sources"][0]["analysis_status"] = source_status
-    with pytest.raises(CheckOutputError, match="complete reports must contain only analyzed sources"):
+    with pytest.raises(
+        CheckOutputError, match="complete reports must contain only analyzed sources"
+    ):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -675,6 +785,9 @@ def test_human_findings_use_import_names_or_paths(
     )
     payload["sources"][0]["import_name"] = "application.entry"
     payload["sources"][1]["import_name"] = None
+    for view in payload["views"].values():
+        view["nodes"][0]["label"] = "application.entry"
+        view["nodes"][1]["label"] = "src/service.py"
     payload["coverage"]["boundaries"] = [
         {
             "name": "pkg.native",
@@ -694,12 +807,14 @@ def test_human_findings_use_import_names_or_paths(
     )
     assert "Unacknowledged native boundary pkg.native" in result.messages[5]
     assert result.messages[6].startswith(
-        "Partial observation: Definite cyclic sources: application.entry, src/service.py."
+        "Partial observation: Error [cycles]: Definite cyclic nodes: "
+        "application.entry, src/service.py."
     )
     assert "application.entry -> src/service.py at" in result.messages[6]
     assert "src/service.py -> application.entry at" in result.messages[6]
     assert result.messages[7].startswith(
-        "Partial observation: Unresolved import in application.entry:"
+        "Partial observation: Error [unresolved-imports]: "
+        "Unresolved import in application.entry:"
     )
     report = PyArchGraphReport.model_validate_json(json.dumps(payload))
     assert report.sources[0].id == "app"
@@ -713,17 +828,274 @@ def test_source_identity_protocol_errors_are_rejected(
     if problem == "duplicate":
         payload["sources"][1]["id"] = "app"
     elif problem == "unknown":
-        payload["views"]["module_body"]["findings"] = [
-            {**import_finding(), "source": "uninventoried-source"}
+        payload["views"]["module-body"]["findings"] = [
+            registered_finding(
+                finding={**import_finding(), "source": "uninventoried-source"},
+                check_id="unresolved-imports",
+                severity="error",
+            )
         ]
     else:
         payload["sources"] = []
         payload["coverage"]["analyzed_source_count"] = 0
-    with pytest.raises(CheckOutputError, match="schema 0.6"):
+    with pytest.raises(CheckOutputError, match="schema 0.7"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+
+def test_schema_07_exposes_nodes_checks_and_evidence_provenance() -> None:
+    report = PyArchGraphReport.model_validate_json(
+        report_json(findings=[cycle_finding("definite"), import_finding()])
+    )
+
+    assert report.schema_version == "0.7"
+    assert set(report.views) == {"structural", "non-typing", "module-body"}
+    view = report.views["structural"]
+    assert view.nodes[0].id == "app"
+    assert view.nodes[0].label == "app"
+    assert view.nodes[0].members == ("app",)
+    assert view.enabled_check_ids == ("cycles", "unresolved-imports")
+    assert view.cyclic_node_count == 2
+    assert view.findings[0].check_id == "cycles"
+    assert view.findings[0].severity == "error"
+    document = report.model_dump(mode="json")
+    cycle = document["views"]["structural"]["findings"][0]["finding"]
+    location = cycle["witness"][0]["evidence"][0]
+    assert location["source"] == "app"
+    assert location["target"] == "service"
+    assert location["fact_id"] == "app-import-service"
+    assert document["views"]["structural"]["findings"][1]["finding"]["node"] == "app"
+
+
+@pytest.mark.parametrize(
+    ("severity", "exit_code", "expected"),
+    [
+        ("info", 0, CheckStatus.PASSED),
+        ("warning", 0, CheckStatus.PASSED),
+        ("error", 1, CheckStatus.FAILED),
+    ],
+)
+def test_custom_views_and_rules_follow_registered_severity(
+    severity: Literal["error", "warning", "info"],
+    exit_code: int,
+    expected: CheckStatus,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=exit_code,
+        stdout=custom_report_json(severity=severity),
+        stderr="",
+    )
+
+    assert result.status is expected
+    assert len(result.messages) == 3
+    assert "gate: packages" in result.messages[0]
+    assert result.messages[1].startswith("Selected view (packages):")
+    assert result.messages[2].startswith(
+        f"{severity.capitalize()} [group-size]: "
+        "Consider a smaller package [large-group]."
+    )
+    assert "Nodes: Application package" in result.messages[2]
+    assert "Sources: app" in result.messages[2]
+    assert "src/app.py:3:1" in result.messages[2]
+
+
+@pytest.mark.parametrize("severity", ["warning", "info"])
+def test_nonerror_cycles_remain_visible_without_failing(
+    severity: str,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(report_json(findings=[cycle_finding("definite")]))
+    for view in payload["views"].values():
+        view["findings"][0]["severity"] = severity
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    assert result.status is CheckStatus.PASSED
+    assert result.messages[-1].startswith(
+        f"{severity.capitalize()} [cycles]: Definite cyclic nodes: app, service."
+    )
+
+
+def test_project_wide_custom_rules_need_no_locations_or_references(
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(custom_report_json(severity="info"))
+    finding = payload["views"]["packages"]["findings"][0]["finding"]
+    finding["node_ids"] = []
+    finding["source_ids"] = []
+    finding["evidence"] = []
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    assert result.status is CheckStatus.PASSED
+    assert result.messages[-1] == (
+        "Info [group-size]: Consider a smaller package [large-group]."
+    )
+
+
+def test_import_provenance_fields_may_explicitly_be_null(
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    finding = {
+        **import_finding(),
+        "node": None,
+        "evidence": [
+            {**evidence(), "source": None, "target": None, "fact_id": None}
+        ],
+    }
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=1,
+        stdout=report_json(findings=[finding]),
+        stderr="",
+    )
+
+    assert result.status is CheckStatus.FAILED
+    assert "Unresolved import in app: Import needs review" in result.messages[-1]
+    assert "src/app.py:3:1" in result.messages[-1]
+
+
+def test_aggregated_cycles_use_node_labels_and_original_evidence(
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(report_json(findings=[cycle_finding("definite")]))
+    view = payload["views"]["structural"]
+    view["nodes"] = [
+        {"id": "entry", "label": "Application group", "members": ["app"]},
+        {"id": "logic", "label": "Service group", "members": ["service"]},
+    ]
+    cycle = view["findings"][0]["finding"]
+    cycle["members"] = ["entry", "logic"]
+    cycle["definite_members"] = ["entry", "logic"]
+    cycle["witness"][0]["source"] = "entry"
+    cycle["witness"][0]["target"] = "logic"
+    cycle["witness"][1]["source"] = "logic"
+    cycle["witness"][1]["target"] = "entry"
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=1,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    assert result.status is CheckStatus.FAILED
+    assert (
+        "Definite cyclic nodes: Application group, Service group."
+        in result.messages[-1]
+    )
+    assert "Application group -> Service group at src/app.py:3:1" in result.messages[-1]
+    assert (
+        "Service group -> Application group at src/service.py:3:1"
+        in result.messages[-1]
+    )
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "missing_nodes",
+        "duplicate_nodes",
+        "unknown_member",
+        "empty_members",
+        "overlapping_members",
+        "duplicate_checks",
+        "disabled_check",
+        "invalid_severity",
+        "missing_finding",
+        "unknown_cycle_node",
+        "unknown_import_node",
+        "unknown_evidence_source",
+        "unknown_evidence_target",
+    ],
+)
+def test_schema_07_rejects_invalid_view_protocol_references(
+    problem: str,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(
+        report_json(findings=[cycle_finding("definite"), import_finding()])
+    )
+    view = payload["views"]["module-body"]
+    if problem == "missing_nodes":
+        del view["nodes"]
+    elif problem == "duplicate_nodes":
+        view["nodes"].append(view["nodes"][0])
+    elif problem == "unknown_member":
+        view["nodes"][0]["members"] = ["unknown-source"]
+    elif problem == "empty_members":
+        view["nodes"][0]["members"] = []
+    elif problem == "overlapping_members":
+        view["nodes"][1]["members"].append("app")
+    elif problem == "duplicate_checks":
+        view["enabled_check_ids"].append("cycles")
+    elif problem == "disabled_check":
+        view["findings"][0]["check_id"] = "disabled-check"
+    elif problem == "invalid_severity":
+        view["findings"][0]["severity"] = "critical"
+    elif problem == "missing_finding":
+        del view["findings"][0]["finding"]
+    elif problem == "unknown_cycle_node":
+        view["findings"][0]["finding"]["members"].append("missing-node")
+    elif problem == "unknown_import_node":
+        view["findings"][1]["finding"]["node"] = "missing-node"
+    elif problem == "unknown_evidence_source":
+        view["findings"][0]["finding"]["witness"][0]["evidence"][0]["source"] = (
+            "missing-source"
+        )
+    else:
+        view["findings"][0]["finding"]["witness"][0]["evidence"][0]["target"] = (
+            "missing-source"
+        )
+
+    with pytest.raises(CheckOutputError, match="schema 0.7"):
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+            check_id="architecture",
+            project_root=tmp_path,
+            exit_code=1,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+
+@pytest.mark.parametrize("field", ["node_ids", "source_ids"])
+def test_custom_rules_reject_unknown_references(
+    field: str,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(custom_report_json(severity="error"))
+    payload["views"]["packages"]["findings"][0]["finding"][field] = ["missing"]
+    with pytest.raises(CheckOutputError, match="schema 0.7"):
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+            check_id="architecture",
+            project_root=tmp_path,
+            exit_code=1,
             stdout=json.dumps(payload),
             stderr="",
         )

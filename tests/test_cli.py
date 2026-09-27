@@ -54,6 +54,7 @@ from checksmith.presentation import OutputPresenter
 from checksmith.processes import LocalProcessRuntime, SubprocessExecutor
 from tests.commands.test_pyarchgraph import (
     HEALTHY_REPORT,
+    custom_report_json,
     cycle_finding,
     partial_report_json,
     report_json,
@@ -74,6 +75,7 @@ def test_cli_imports_the_command_factory_and_implementations(
     assert {
         "checksmith.commands.registry",
         "checksmith.commands.command",
+        "checksmith.commands.complexipy",
         "checksmith.commands.import_linter",
         "checksmith.commands.pyarchgraph",
         "checksmith.commands.pytest",
@@ -1177,6 +1179,12 @@ def pyarchgraph_config_file(tmp_path: Path) -> Path:
     [
         (HEALTHY_REPORT, 0, CheckStatus.PASSED, ExitCode.SUCCESS),
         (
+            custom_report_json(severity="warning"),
+            0,
+            CheckStatus.PASSED,
+            ExitCode.SUCCESS,
+        ),
+        (
             report_json(findings=[cycle_finding("possible")]),
             1,
             CheckStatus.FAILED,
@@ -1221,9 +1229,13 @@ def test_cli_reports_pyarchgraph_findings(
         output = CheckOutput.model_validate_json(result.stdout)
         assert output.results[0].check_id == "architecture"
         assert output.results[0].status is status
+        gate = json.loads(content)["gate"]
         assert output.results[0].messages[0] == (
-            "Analysis is complete; gate: structural; sources: 2; analyzed: 2."
+            f"Analysis is complete; gate: {gate}; sources: 2; analyzed: 2."
         )
+        if gate == "packages":
+            assert "Warning [group-size]" in output.results[0].messages[-1]
+            assert "Application package" in output.results[0].messages[-1]
     else:
         assert "architecture" in result.stdout
         assert ("PASS" if status is CheckStatus.PASSED else "FAIL") in result.stdout
@@ -1236,6 +1248,12 @@ def test_cli_reports_pyarchgraph_findings(
         ("not json", 0, "", "Invalid PyArchGraph report"),
         ("", 2, "Cannot analyze src", "pyarchgraph exited 2"),
         (HEALTHY_REPORT, 1, "", "exit code disagrees"),
+        (
+            HEALTHY_REPORT.replace('"0.7"', '"0.6"'),
+            0,
+            "",
+            "schema 0.7",
+        ),
         (
             partial_report_json(findings=[cycle_finding("definite")]),
             2,
@@ -1282,6 +1300,175 @@ def test_prepare_is_no_longer_a_command(
     result = cli_runner.invoke(app, ["prepare"])
     assert result.exit_code == ExitCode.ERROR
     assert "No such command" in result.stderr
+
+
+@pytest.fixture
+def complexipy_config_file(tmp_path: Path) -> Path:
+    path = tmp_path / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: .\n"
+        "checks:\n"
+        "  - id: cognitive-complexity\n"
+        "    package_type: uvx\n"
+        "    package: complexipy==8.0.1\n"
+        "    command: complexipy\n"
+        "    args:\n"
+        "      - --plain\n"
+        "      - --failed\n"
+        "      - --max-complexity-allowed\n"
+        '      - "10"\n'
+        "      - --exclude\n"
+        "      - tests/**\n"
+        "      - --color\n"
+        '      - "no"\n'
+        "      - --snapshot-ignore\n"
+        "      - --snapshot-create=false\n"
+        "      - --ignore-complexity=false\n"
+        "      - --report-ignored=false\n"
+        "      - .\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@pytest.mark.parametrize("stderr", ["", "Installed 1 package in 12ms\n"])
+def test_cli_reports_a_clean_complexipy_check(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    complexipy_config_file: Path,
+    processes: FakeProcesses,
+    stderr: str,
+) -> None:
+    processes.stdout = ""
+    processes.stderr = stderr
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(complexipy_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started[0].cwd == complexipy_config_file.parent
+    assert processes.started[0].argv == (
+        "uvx",
+        "--from",
+        "complexipy==8.0.1",
+        "complexipy",
+        "--plain",
+        "--failed",
+        "--max-complexity-allowed",
+        "10",
+        "--exclude",
+        "tests/**",
+        "--color",
+        "no",
+        "--snapshot-ignore",
+        "--snapshot-create=false",
+        "--ignore-complexity=false",
+        "--report-ignored=false",
+        ".",
+    )
+    assert json.loads(result.stdout) == {
+        "results": [
+            {"check_id": "cognitive-complexity", "status": "passed", "messages": []}
+        ]
+    }
+
+
+@pytest.mark.parametrize("tool_exit_code", [0, 1])
+def test_cli_reports_excessive_cognitive_complexity_as_unhealthy(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    complexipy_config_file: Path,
+    processes: FakeProcesses,
+    tool_exit_code: int,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = (
+        f"{complexipy_config_file.parent}/src/my app.py parse 11\n"
+        "./src/service.py Service::execute 16\n"
+    )
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(complexipy_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.UNHEALTHY
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "results": [
+            {
+                "check_id": "cognitive-complexity",
+                "status": "failed",
+                "messages": [
+                    "src/my app.py: parse has cognitive complexity 11.",
+                    "src/service.py: Service::execute has cognitive complexity 16.",
+                ],
+            }
+        ]
+    }
+
+
+@pytest.mark.parametrize(
+    ("tool_exit_code", "stdout", "stderr", "diagnostic"),
+    [
+        (0, "not a plain report", "", "not a plain report"),
+        (
+            1,
+            (
+                "src/app.py parse 11\n"
+                "error: Failed to process src/broken.py - Please check file/folder "
+                "exists or check syntax\n"
+            ),
+            "",
+            "Failed to process src/broken.py",
+        ),
+        (1, "", "Failed to download complexipy", "Failed to download complexipy"),
+        (2, "argument details", "error: invalid arguments", "invalid arguments"),
+        (
+            0,
+            "",
+            "Failed to parse /project/complexipy.toml: expected a table\n",
+            "Failed to parse /project/complexipy.toml",
+        ),
+        (
+            1,
+            "src/app.py parse 11\n",
+            "Invalid config in /project/pyproject.toml: invalid type\n",
+            "Invalid config in /project/pyproject.toml",
+        ),
+        (1, "", "", "without reporting findings"),
+    ],
+)
+def test_cli_reports_complexipy_execution_and_output_errors(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    complexipy_config_file: Path,
+    processes: FakeProcesses,
+    tool_exit_code: int,
+    stdout: str,
+    stderr: str,
+    diagnostic: str,
+) -> None:
+    processes.exit_code = tool_exit_code
+    processes.stdout = stdout
+    processes.stderr = stderr
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(complexipy_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    results = json.loads(result.stdout)["results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "cognitive-complexity"
+    assert results[0]["status"] == "error"
+    assert diagnostic in "\n".join(results[0]["messages"])
 
 
 @pytest.fixture

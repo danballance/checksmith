@@ -260,17 +260,19 @@ def test_nothing_is_read_when_nothing_ran(
 
 
 @pytest.mark.parametrize(
-    ("command_name", "package"),
+    ("command_name", "package", "arguments"),
     [
-        (CommandName.RUFF, "ruff==0.16.7"),
-        (CommandName.SEMGREP, "semgrep==1.176.1"),
-        (CommandName.IMPORT_LINTER, "import-linter==2.15"),
-        (CommandName.TY, "ty==0.0.80"),
+        (CommandName.COMPLEXIPY, "complexipy==8.0.1", ("--plain", "--failed")),
+        (CommandName.RUFF, "ruff==0.16.7", ()),
+        (CommandName.SEMGREP, "semgrep==1.176.1", ()),
+        (CommandName.IMPORT_LINTER, "import-linter==2.15", ()),
+        (CommandName.TY, "ty==0.0.80", ()),
     ],
 )
 def test_invalid_utf8_output_is_a_check_output_error(
     command_name: CommandName,
     package: str,
+    arguments: tuple[str, ...],
 ) -> None:
     decoding_error = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
 
@@ -291,7 +293,7 @@ def test_invalid_utf8_output_is_a_check_output_error(
         package_type=PackageType.UVX,
         package=package,
         command=command_name,
-        args=(),
+        args=arguments,
     )
 
     with pytest.raises(CheckOutputError) as raised:

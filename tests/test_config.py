@@ -604,6 +604,29 @@ def test_a_semgrep_check_is_accepted_and_builds_a_uvx_vector() -> None:
     )
 
 
+def test_a_complexipy_check_is_accepted_and_builds_a_uvx_vector() -> None:
+    configured = resolved(
+        id="cognitive-complexity",
+        package="complexipy==8.0.1",
+        command="complexipy",
+        args=["--plain", "--failed", "--max-complexity-allowed", "10", "."],
+    )
+
+    assert configured.id == "cognitive-complexity"
+    assert configured.command is CommandName.COMPLEXIPY
+    assert configured.argv == (
+        "uvx",
+        "--from",
+        "complexipy==8.0.1",
+        "complexipy",
+        "--plain",
+        "--failed",
+        "--max-complexity-allowed",
+        "10",
+        ".",
+    )
+
+
 def test_a_ty_check_is_accepted_and_builds_a_uvx_vector() -> None:
     configured = resolved(
         id="type-check",

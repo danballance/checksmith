@@ -7,6 +7,7 @@ import pytest
 
 from checksmith.commands.astcheck import AstcheckCommand
 from checksmith.commands.command import Command
+from checksmith.commands.complexipy import ComplexipyCommand
 from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
 from checksmith.commands.pytest import PytestCommand
@@ -27,6 +28,7 @@ def test_importing_the_registry_loads_each_command_implementation(
     assert {
         "checksmith.commands.astcheck",
         "checksmith.commands.command",
+        "checksmith.commands.complexipy",
         "checksmith.commands.import_linter",
         "checksmith.commands.pyarchgraph",
         "checksmith.commands.pytest",
@@ -41,6 +43,7 @@ def test_importing_the_registry_loads_each_command_implementation(
     ("command_name", "expected"),
     [
         (CommandName.ASTCHECK, AstcheckCommand),
+        (CommandName.COMPLEXIPY, ComplexipyCommand),
         (CommandName.RUFF, RuffCommand),
         (CommandName.SEMGREP, SemgrepCommand),
         (CommandName.IMPORT_LINTER, ImportLinterCommand),
@@ -83,6 +86,7 @@ def test_each_registered_command_answers_to_the_key_it_is_filed_under(
     ("command_name", "exit_code", "stdout"),
     [
         (CommandName.ASTCHECK, 0, CLEAN_REPORT),
+        (CommandName.COMPLEXIPY, 0, ""),
         (CommandName.RUFF, 0, "[]"),
         (CommandName.SEMGREP, 0, '{"results": [], "errors": []}'),
         (CommandName.IMPORT_LINTER, 0, "Contracts: 1 kept, 0 broken."),

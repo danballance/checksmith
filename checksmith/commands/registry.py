@@ -2,6 +2,7 @@ from collections.abc import Mapping
 
 from checksmith.commands.astcheck import AstcheckCommand
 from checksmith.commands.command import Command
+from checksmith.commands.complexipy import ComplexipyCommand
 from checksmith.commands.import_linter import (
     ImportLinterCommand,
     ImportLinterEligibility,
@@ -41,6 +42,10 @@ class CommandFactory:
         front of a user.
         """
         match name:
+            case CommandName.COMPLEXIPY:
+                return ComplexipyCommand(
+                    executor=self._executor, uv_prerequisites=self._uv_prerequisites
+                )
             case CommandName.ASTCHECK:
                 return AstcheckCommand(
                     executor=self._executor, uv_prerequisites=self._uv_prerequisites

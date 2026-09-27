@@ -8,7 +8,7 @@ import pytest
 
 from checksmith.config import ConfigPath
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
-from checksmith.dtos import CommandName
+from checksmith.dtos import CommandName, PackageType
 
 
 @pytest.fixture
@@ -46,6 +46,40 @@ def test_the_starter_config_loads_through_the_real_loader(
         ".",
         "--gate",
         "structural",
+    )
+
+
+def test_the_starter_config_enforces_cognitive_complexity(
+    default_assets: Path,
+) -> None:
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+    complexity = next(
+        check for check in config.checks if check.command is CommandName.COMPLEXIPY
+    )
+
+    assert complexity.id == "complexipy"
+    assert complexity.package_type is PackageType.UVX
+    assert complexity.argv == (
+        "uvx",
+        "--from",
+        "complexipy==8.0.1",
+        "complexipy",
+        "--plain",
+        "--failed",
+        "--max-complexity-allowed",
+        "10",
+        "--exclude",
+        "tests/**",
+        "--color",
+        "no",
+        "--snapshot-ignore",
+        "--snapshot-create=false",
+        "--ignore-complexity=false",
+        "--report-ignored=false",
+        ".",
     )
 
 

@@ -63,6 +63,8 @@ class CommandName(StrEnum):
 
     ASTCHECK = "astcheck"
 
+    COMPLEXIPY = "complexipy"
+
     SEMGREP = "semgrep"
 
     IMPORT_LINTER = "import-linter"

@@ -44,6 +44,26 @@ checks:
       - --strict
       - .
 
+  - id: complexipy
+    package_type: uvx
+    package: "complexipy==8.0.1"
+    command: complexipy
+
+    args:
+      - --plain
+      - --failed
+      - --max-complexity-allowed
+      - "10"
+      - --exclude
+      - "tests/**"
+      - --color
+      - "no"
+      - --snapshot-ignore
+      - --snapshot-create=false
+      - --ignore-complexity=false
+      - --report-ignored=false
+      - .
+
   - id: ty
     package_type: uvx
     package: "ty==0.0.80"
