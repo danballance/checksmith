@@ -14,6 +14,7 @@ from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
 from checksmith.commands.ty import TyCommand
 from checksmith.dtos import CheckStatus, CommandName
+from tests.commands.test_pyarchgraph import HEALTHY_REPORT
 
 
 def test_importing_the_registry_loads_each_command_implementation(
@@ -84,10 +85,7 @@ def test_each_registered_command_answers_to_the_key_it_is_filed_under(
         (
             CommandName.PYARCHGRAPH,
             0,
-            (
-                '{"schema_version":"0.5","module_count":2,'
-                '"dependency_count":2,"findings":[]}'
-            ),
+            HEALTHY_REPORT,
         ),
         (CommandName.PYTEST, 10, "1 passed"),
     ],

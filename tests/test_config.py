@@ -627,23 +627,27 @@ def test_a_ty_check_is_accepted_and_builds_a_uvx_vector() -> None:
     )
 
 
-def test_pyarchgraph_configuration_passes_source_and_rules_unchanged() -> None:
+def test_pyarchgraph_configuration_passes_roots_and_gate_unchanged() -> None:
     configured = resolved(
         command="pyarchgraph",
-        package="pyarchgraph==0.5.0",
-        args=["src", "--exclude", "vendor/*", "--forbid", "app:service"],
+        package="pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
+        args=["src", "plugins", "--exclude", "vendor/*", "--gate", "module-body"],
     )
     assert configured.command is CommandName.PYARCHGRAPH
     assert configured.argv == (
         "uvx",
+        "--isolated",
+        "--refresh-package",
+        "pyarchgraph",
         "--from",
-        "pyarchgraph==0.5.0",
+        "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
         "pyarchgraph",
         "src",
+        "plugins",
         "--exclude",
         "vendor/*",
-        "--forbid",
-        "app:service",
+        "--gate",
+        "module-body",
     )
 
 

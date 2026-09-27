@@ -64,3 +64,5 @@ checks:
 
     args:
       - .
+      - --gate
+      - structural

@@ -8,6 +8,7 @@ import pytest
 
 from checksmith.config import ConfigPath
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
+from checksmith.dtos import CommandName
 
 
 @pytest.fixture
@@ -31,6 +32,21 @@ def test_the_starter_config_loads_through_the_real_loader(
     )
 
     assert config.checks
+    architecture = next(
+        check for check in config.checks if check.command is CommandName.PYARCHGRAPH
+    )
+    assert architecture.argv == (
+        "uvx",
+        "--isolated",
+        "--refresh-package",
+        "pyarchgraph",
+        "--from",
+        "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
+        "pyarchgraph",
+        ".",
+        "--gate",
+        "structural",
+    )
 
 
 def test_the_starter_config_references_only_files_it_ships_with(

@@ -50,7 +50,12 @@ from checksmith.logs import LOGGER_NAME, LoggingConfigurator
 from checksmith.outputs.checkoutput import CheckOutput
 from checksmith.presentation import OutputPresenter
 from checksmith.processes import LocalProcessRuntime, SubprocessExecutor
-from tests.commands.test_pyarchgraph import HEALTHY_REPORT, cycle_finding, report_json
+from tests.commands.test_pyarchgraph import (
+    HEALTHY_REPORT,
+    cycle_finding,
+    partial_report_json,
+    report_json,
+)
 from tests.conftest import FakeProcesses, make_command_factory
 
 
@@ -1043,7 +1048,7 @@ def pyarchgraph_config_file(tmp_path: Path) -> Path:
         "checks:\n"
         "  - id: architecture\n"
         "    package_type: uvx\n"
-        "    package: pyarchgraph==0.5.0\n"
+        "    package: pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main\n"
         "    command: pyarchgraph\n"
         "    args: [src]\n",
         encoding="utf-8",
@@ -1089,8 +1094,11 @@ def test_cli_reports_pyarchgraph_findings(
     assert processes.started[0].cwd == root
     assert processes.started[0].argv == (
         "uvx",
+        "--isolated",
+        "--refresh-package",
+        "pyarchgraph",
         "--from",
-        "pyarchgraph==0.5.0",
+        "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
         "pyarchgraph",
         "src",
     )
@@ -1098,7 +1106,9 @@ def test_cli_reports_pyarchgraph_findings(
         output = CheckOutput.model_validate_json(result.stdout)
         assert output.results[0].check_id == "architecture"
         assert output.results[0].status is status
-        assert output.results[0].messages[0] == "Modules: 2; dependencies: 2."
+        assert output.results[0].messages[0] == (
+            "Analysis is complete; gate: structural; sources: 2; analyzed: 2."
+        )
     else:
         assert "architecture" in result.stdout
         assert ("PASS" if status is CheckStatus.PASSED else "FAIL") in result.stdout
@@ -1111,6 +1121,12 @@ def test_cli_reports_pyarchgraph_findings(
         ("not json", 0, "", "Invalid PyArchGraph report"),
         ("", 2, "Cannot analyze src", "pyarchgraph exited 2"),
         (HEALTHY_REPORT, 1, "", "exit code disagrees"),
+        (
+            partial_report_json(findings=[cycle_finding("definite")]),
+            2,
+            "",
+            "source_syntax_error",
+        ),
     ],
 )
 def test_cli_reports_pyarchgraph_errors(

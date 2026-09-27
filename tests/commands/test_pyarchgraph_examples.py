@@ -8,6 +8,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel
 
+from checksmith.commands.pyarchgraph import PyArchGraphReport
 from checksmith.config import Check
 from checksmith.dtos import CheckStatus, CommandName, PackageType
 from checksmith.runner import Runner
@@ -17,19 +18,22 @@ from tests.conftest import FakeProcesses, make_command_factory
 class ExpectedOutcome(BaseModel):
     outcome: Literal["pass", "fail", "error"]
     exit_code: Literal[0, 1, 2]
+    status: Literal["complete", "incomplete"]
 
 
 class ExampleRun(BaseModel):
     id: str
-    source_root: str
+    source_roots: tuple[str, ...]
     exclusions: tuple[str, ...]
-    forbidden_dependencies: tuple[tuple[str, str], ...]
+    gate: Literal["structural", "non-typing", "module-body"]
+    details: Literal["summary", "component-edges"]
+    config: str | None
     expected: ExpectedOutcome
     variants: tuple[ExampleRun, ...] = ()
 
 
 class ExampleCorpus(BaseModel):
-    schema_version: Literal[2]
+    schema_version: Literal[3]
     projects: tuple[ExampleRun, ...]
 
 
@@ -55,8 +59,12 @@ RUNS = [
 
 
 def test_every_project_and_variant_is_selected() -> None:
-    assert len(CORPUS.projects) == 25
-    assert len(RUNS) == 28
+    assert CORPUS.projects
+    assert len(RUNS) == sum(1 + len(project.variants) for project in CORPUS.projects)
+    assert len({(project_id, run.id) for project_id, run in RUNS}) == len(RUNS)
+    assert {project_id for project_id, _ in RUNS} == {
+        project.id for project in CORPUS.projects
+    }
 
 
 @pytest.mark.parametrize(
@@ -68,12 +76,13 @@ def test_real_cli_examples_produce_expected_checksmith_results(
     project_id: str,
     example: ExampleRun,
 ) -> None:
-    source = PRODUCER / "examples" / "projects" / project_id / example.source_root
-    arguments = [str(source)]
+    project = PRODUCER / "examples" / "projects" / project_id
+    arguments = [str(project / root) for root in example.source_roots]
+    arguments.extend(("--gate", example.gate, "--details", example.details))
     for pattern in example.exclusions:
         arguments.extend(("--exclude", pattern))
-    for source_pattern, target_pattern in example.forbidden_dependencies:
-        arguments.extend(("--forbid", f"{source_pattern}:{target_pattern}"))
+    if example.config is not None:
+        arguments.extend(("--config", str(project / example.config)))
     completed = subprocess.run(
         (
             "uv",
@@ -95,6 +104,9 @@ def test_real_cli_examples_produce_expected_checksmith_results(
         timeout=30,
     )
     assert completed.returncode == example.expected.exit_code, completed.stderr
+    report = PyArchGraphReport.model_validate_json(completed.stdout)
+    assert report.status == example.expected.status
+    assert report.gate == example.gate
 
     processes = FakeProcesses()
     processes.exit_code = completed.returncode
@@ -104,7 +116,7 @@ def test_real_cli_examples_produce_expected_checksmith_results(
     check = Check(
         id=f"{project_id}/{example.id}",
         package_type=PackageType.UVX,
-        package="pyarchgraph==0.5.0",
+        package="pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
         command=CommandName.PYARCHGRAPH,
         args=tuple(arguments),
     )
@@ -124,5 +136,5 @@ def test_real_cli_examples_produce_expected_checksmith_results(
         assert len(output.results[0].messages) > 1
         assert any(".py:" in message for message in output.results[0].messages)
     if expected is CheckStatus.ERROR:
-        assert completed.stdout == ""
-        assert completed.stderr.strip() in output.results[0].messages[0]
+        assert completed.stdout
+        assert any("Analysis is incomplete" in msg for msg in output.results[0].messages)
