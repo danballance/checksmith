@@ -61,6 +61,8 @@ class CommandName(StrEnum):
     RUFF = "ruff"
     """Ruff, a Python linter and formatter."""
 
+    ASTCHECK = "astcheck"
+
     SEMGREP = "semgrep"
 
     IMPORT_LINTER = "import-linter"

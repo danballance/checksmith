@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from checksmith.commands.astcheck import AstcheckCommand
 from checksmith.commands.command import Command
 from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
@@ -14,6 +15,7 @@ from checksmith.commands.ruff import RuffCommand
 from checksmith.commands.semgrep import SemgrepCommand
 from checksmith.commands.ty import TyCommand
 from checksmith.dtos import CheckStatus, CommandName
+from tests.commands.test_astcheck import CLEAN_REPORT
 from tests.commands.test_pyarchgraph import HEALTHY_REPORT
 
 
@@ -23,6 +25,7 @@ def test_importing_the_registry_loads_each_command_implementation(
     modules = imported_modules("checksmith.commands.registry")
 
     assert {
+        "checksmith.commands.astcheck",
         "checksmith.commands.command",
         "checksmith.commands.import_linter",
         "checksmith.commands.pyarchgraph",
@@ -37,6 +40,7 @@ def test_importing_the_registry_loads_each_command_implementation(
 @pytest.mark.parametrize(
     ("command_name", "expected"),
     [
+        (CommandName.ASTCHECK, AstcheckCommand),
         (CommandName.RUFF, RuffCommand),
         (CommandName.SEMGREP, SemgrepCommand),
         (CommandName.IMPORT_LINTER, ImportLinterCommand),
@@ -78,6 +82,7 @@ def test_each_registered_command_answers_to_the_key_it_is_filed_under(
 @pytest.mark.parametrize(
     ("command_name", "exit_code", "stdout"),
     [
+        (CommandName.ASTCHECK, 0, CLEAN_REPORT),
         (CommandName.RUFF, 0, "[]"),
         (CommandName.SEMGREP, 0, '{"results": [], "errors": []}'),
         (CommandName.IMPORT_LINTER, 0, "Contracts: 1 kept, 0 broken."),

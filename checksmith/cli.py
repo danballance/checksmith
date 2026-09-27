@@ -2,6 +2,7 @@
 
 import logging
 import os
+from importlib.metadata import version
 from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Any, Final
@@ -11,7 +12,9 @@ from rich.console import Console
 from rich.logging import RichHandler
 from typer.core import TyperGroup
 
+from astcheck.adapters.plugins import EntryPointPluginRegistry, InstalledPluginCatalog
 from checksmith import __version__
+from checksmith.astcheck_setup import AstcheckSetup, TerminalInput
 from checksmith.checking import CheckService
 from checksmith.commands.import_linter import ImportLinterPrerequisites
 from checksmith.commands.pytest import PackagedLauncherSource
@@ -74,6 +77,18 @@ ProjectRootOption = Annotated[
     ),
 ]
 
+AstcheckPolicyOption = Annotated[
+    Path | None,
+    typer.Option(
+        "--astcheck-policy",
+        metavar="PATH",
+        help=(
+            "ASTcheck policy containing explicit sources, exclusions, and plugins. "
+            "Omit to configure sources and OOP checks interactively."
+        ),
+    ),
+]
+
 DebugOption = Annotated[
     bool,
     typer.Option(*DEBUG_FLAGS, help="Write debug logging to stderr."),
@@ -115,11 +130,13 @@ class CliApplication:
         self,
         checks: CheckService,
         initializer: Initializer,
+        astcheck_setup: AstcheckSetup,
         presenter: OutputPresenter,
         logging: LoggingConfigurator,
     ) -> None:
         self._checks = checks
         self._initializer = initializer
+        self._astcheck_setup = astcheck_setup
         self._presenter = presenter
         self._logging = logging
 
@@ -182,17 +199,33 @@ class CliApplication:
         """
         raise NotImplementedError
 
-    def init(self, project_root: ProjectRootOption = None) -> None:
+    def init(
+        self,
+        project_root: ProjectRootOption = None,
+        astcheck_policy: AstcheckPolicyOption = None,
+    ) -> None:
         """Create the bundled configuration files in the current directory.
 
         Operation id: ``init``. Output kind: ``Init``.
         """
         destination = Path.cwd()
+        missing_options = tuple(
+            name
+            for name, value in (
+                ("--project-root", project_root),
+                ("--astcheck-policy", astcheck_policy),
+            )
+            if value is None
+        )
+        self._astcheck_setup.require_interactive(missing_options=missing_options)
         if project_root is None:
             project_root = Path(typer.prompt("Project root", default=str(destination)))
+        policy = self._astcheck_setup.policy(config_file=astcheck_policy)
         self._presenter.emit(
             self._initializer.initialize(
-                destination=destination, project_root=project_root
+                destination=destination,
+                project_root=project_root,
+                astcheck_policy=policy,
             ),
             OutputFormat.TEXT,
         )
@@ -235,8 +268,12 @@ app = CliApplication(
         assets=PackagedAssetSource(
             directory=files("checksmith") / "assets" / "default"
         ),
-        renderer=YamlConfigRenderer(),
+        renderer=YamlConfigRenderer(distribution_version=version("checksmith")),
         filesystem=LocalInitializationFilesystem(),
+    ),
+    astcheck_setup=AstcheckSetup(
+        registry=EntryPointPluginRegistry(catalog=InstalledPluginCatalog()),
+        terminal=TerminalInput(),
     ),
     presenter=OutputPresenter(console=Console()),
     logging=LoggingConfigurator(

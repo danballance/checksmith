@@ -1,5 +1,6 @@
 from collections.abc import Mapping
 
+from checksmith.commands.astcheck import AstcheckCommand
 from checksmith.commands.command import Command
 from checksmith.commands.import_linter import (
     ImportLinterCommand,
@@ -40,6 +41,10 @@ class CommandFactory:
         front of a user.
         """
         match name:
+            case CommandName.ASTCHECK:
+                return AstcheckCommand(
+                    executor=self._executor, uv_prerequisites=self._uv_prerequisites
+                )
             case CommandName.RUFF:
                 return RuffCommand(
                     executor=self._executor, uv_prerequisites=self._uv_prerequisites

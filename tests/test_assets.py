@@ -49,7 +49,7 @@ def test_the_starter_config_loads_through_the_real_loader(
     )
 
 
-def test_the_starter_config_references_only_files_it_ships_with(
+def test_the_starter_config_references_bundled_or_generated_files(
     default_assets: Path,
 ) -> None:
     config = ConfigLoader(source=LocalYamlConfigSource()).load(
@@ -67,5 +67,8 @@ def test_the_starter_config_references_only_files_it_ships_with(
     )
 
     for path in referenced_files:
+        if path.name == "astcheck.yaml":
+            assert path.parent == default_assets
+            continue
         assert path.is_file()
         assert path.resolve() in shipped_files

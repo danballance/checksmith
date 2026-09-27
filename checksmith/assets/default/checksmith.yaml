@@ -5,6 +5,18 @@ project_root: ../../..
 # An argument written as `config_path:` names a file relative to this config filed.
 # Every path written as a plain text string resolves relative to project_root.
 checks:
+  - id: astcheck
+    package_type: uvx
+    package: "checksmith==0.1.0"
+    command: astcheck
+
+    args:
+      - check
+      - --config
+      - config_path: astcheck.yaml
+      - --format
+      - json
+
   - id: ruff
     package_type: uvx
     package: "ruff==0.16.7"

@@ -6,6 +6,7 @@ import pytest
 import yaml
 from pydantic import BaseModel, ValidationError
 
+from astcheck.domain.configuration import AnalysisPolicy, PluginConfiguration
 from checksmith.config import Config, ConfigPath
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
 from checksmith.errors import ChecksmithError
@@ -23,6 +24,27 @@ ASSET_NAMES = (
     "semgrep.yaml",
     "coverage.toml",
 )
+
+
+FILE_NAMES = ASSET_NAMES + ("astcheck.yaml",)
+
+
+def make_astcheck_policy() -> AnalysisPolicy:
+    return AnalysisPolicy(
+        sources=(".",),
+        exclusions=(),
+        plugins=(
+            PluginConfiguration(
+                id="oopcheck",
+                settings={
+                    "max_standalone_percent": 25,
+                    "min_callable_statements": 20,
+                    "min_shared_functions": 3,
+                    "collaborators": [],
+                },
+            ),
+        ),
+    )
 
 
 class RenderCall(BaseModel):
@@ -61,9 +83,7 @@ class RecordingConfigRenderer:
         self.error = error
         self.calls: list[RenderCall] = []
 
-    def render(
-        self, *, content: bytes, config_file: Path, project_root: Path
-    ) -> bytes:
+    def render(self, *, content: bytes, config_file: Path, project_root: Path) -> bytes:
         self.events.append(f"render:{config_file.name}")
         self.calls.append(
             RenderCall(
@@ -113,9 +133,7 @@ class RecordingFilesystem:
 
 
 class CompetingFilesystem:
-    def __init__(
-        self, filesystem: LocalInitializationFilesystem, raced: Path
-    ) -> None:
+    def __init__(self, filesystem: LocalInitializationFilesystem, raced: Path) -> None:
         self.filesystem = filesystem
         self.raced = raced
 
@@ -164,7 +182,7 @@ def asset_directory(tmp_path: Path) -> Path:
 def initializer(asset_directory: Path) -> Initializer:
     return Initializer(
         assets=PackagedAssetSource(directory=asset_directory),
-        renderer=YamlConfigRenderer(),
+        renderer=YamlConfigRenderer(distribution_version="0.1.0"),
         filesystem=LocalInitializationFilesystem(),
     )
 
@@ -219,11 +237,15 @@ def test_orchestration_prepares_every_asset_before_writing(
     destination: Path,
     project_root: Path,
 ) -> None:
-    output = orchestrator.initialize(destination=destination, project_root=project_root)
+    output = orchestrator.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=project_root,
+    )
 
     assert Initializer.ASSET_NAMES == ASSET_NAMES
     assert output.project_root == project_root
-    assert output.created_files == tuple(destination / name for name in ASSET_NAMES)
+    assert output.created_files == tuple(destination / name for name in FILE_NAMES)
     assert renderer.calls == [
         RenderCall(
             content=asset_source.contents["checksmith.yaml"],
@@ -231,7 +253,7 @@ def test_orchestration_prepares_every_asset_before_writing(
             project_root=project_root,
         )
     ]
-    assert filesystem.written == [
+    assert filesystem.written[:-1] == [
         PreparedFile(
             path=destination / name,
             content=(
@@ -242,14 +264,20 @@ def test_orchestration_prepares_every_asset_before_writing(
         )
         for name in ASSET_NAMES
     ]
+    assert filesystem.written[-1].path.name == "astcheck.yaml"
+    assert yaml.safe_load(filesystem.written[-1].content) == {
+        **make_astcheck_policy().model_dump(mode="json"),
+        "schema_version": 1,
+        "project_root": "../project",
+    }
     assert events == [
         f"directory:{destination}",
         f"directory:{project_root}",
-        *(f"exists:{name}" for name in ASSET_NAMES),
+        *(f"exists:{name}" for name in FILE_NAMES),
         "read:checksmith.yaml",
         "render:checksmith.yaml",
         *(f"read:{name}" for name in ASSET_NAMES[1:]),
-        *(f"write:{name}" for name in ASSET_NAMES),
+        *(f"write:{name}" for name in FILE_NAMES),
     ]
 
 
@@ -266,7 +294,11 @@ def test_asset_read_failures_stop_preparation_without_writing(
     asset_source.failed_name = name
 
     with pytest.raises(ChecksmithError, match=f"Could not read bundled asset {name}"):
-        orchestrator.initialize(destination=destination, project_root=project_root)
+        orchestrator.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=project_root,
+        )
 
     assert events[-1] == f"read:{name}"
     assert not filesystem.written
@@ -284,7 +316,11 @@ def test_render_failure_stops_preparation_without_writing(
     renderer.error = error
 
     with pytest.raises(ChecksmithError) as raised:
-        orchestrator.initialize(destination=destination, project_root=project_root)
+        orchestrator.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=project_root,
+        )
 
     assert raised.value is error
     assert events[-1] == "render:checksmith.yaml"
@@ -304,7 +340,11 @@ def test_invalid_directories_fail_before_reading_assets(
     filesystem.directories.remove(invalid_path)
 
     with pytest.raises(ChecksmithError) as raised:
-        orchestrator.initialize(destination=destination, project_root=project_root)
+        orchestrator.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=project_root,
+        )
 
     assert str(invalid_path) in str(raised.value)
     expected_events = [f"directory:{destination}"]
@@ -331,7 +371,11 @@ def test_inspection_errors_have_path_context_and_stop_initialization(
     filesystem.unreadable = paths[path_kind]
 
     with pytest.raises(ChecksmithError) as raised:
-        orchestrator.initialize(destination=destination, project_root=project_root)
+        orchestrator.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=project_root,
+        )
 
     assert str(filesystem.unreadable) in str(raised.value)
     assert "Could not inspect" in str(raised.value)
@@ -353,18 +397,22 @@ def test_preflight_reports_all_collisions_before_reading_assets(
     filesystem.entries = {destination / "ruff.toml", destination / "coverage.toml"}
 
     with pytest.raises(ChecksmithError) as raised:
-        orchestrator.initialize(destination=destination, project_root=project_root)
+        orchestrator.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=project_root,
+        )
 
     assert all(str(path) in str(raised.value) for path in filesystem.entries)
     assert events == [
         f"directory:{destination}",
         f"directory:{project_root}",
-        *(f"exists:{name}" for name in ASSET_NAMES),
+        *(f"exists:{name}" for name in FILE_NAMES),
     ]
     assert not filesystem.written
 
 
-@pytest.mark.parametrize("name", ASSET_NAMES)
+@pytest.mark.parametrize("name", FILE_NAMES)
 def test_a_write_failure_keeps_earlier_files_and_stops(
     orchestrator: Initializer,
     filesystem: RecordingFilesystem,
@@ -376,30 +424,39 @@ def test_a_write_failure_keeps_earlier_files_and_stops(
     filesystem.refused = destination / name
 
     with pytest.raises(ChecksmithError) as raised:
-        orchestrator.initialize(destination=destination, project_root=project_root)
+        orchestrator.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=project_root,
+        )
 
     assert str(filesystem.refused) in str(raised.value)
     assert "creation denied" in str(raised.value)
     assert isinstance(raised.value.__cause__, PermissionError)
     assert events[-1] == f"write:{name}"
     assert [written.path.name for written in filesystem.written] == list(
-        ASSET_NAMES[:ASSET_NAMES.index(name)]
+        FILE_NAMES[: FILE_NAMES.index(name)]
     )
 
 
-def test_initialization_writes_exactly_the_four_starter_files(
+def test_initialization_writes_exactly_the_five_starter_files(
     initializer: Initializer,
     destination: Path,
 ) -> None:
-    output = initializer.initialize(destination=destination, project_root=destination)
+    output = initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=destination,
+    )
 
-    expected_files = tuple(destination / name for name in ASSET_NAMES)
+    expected_files = tuple(destination / name for name in FILE_NAMES)
     assert output.project_root == destination
     assert output.created_files == expected_files
     assert set(destination.iterdir()) == set(expected_files)
-    assert yaml.safe_load((destination / "checksmith.yaml").read_bytes())[
-        "project_root"
-    ] == "."
+    assert (
+        yaml.safe_load((destination / "checksmith.yaml").read_bytes())["project_root"]
+        == "."
+    )
 
 
 def test_supporting_files_are_preserved(
@@ -407,10 +464,16 @@ def test_supporting_files_are_preserved(
     asset_directory: Path,
     destination: Path,
 ) -> None:
-    initializer.initialize(destination=destination, project_root=destination)
+    initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=destination,
+    )
 
     for name in ASSET_NAMES[1:]:
-        assert (destination / name).read_bytes() == (asset_directory / name).read_bytes()
+        assert (destination / name).read_bytes() == (
+            asset_directory / name
+        ).read_bytes()
 
 
 def test_generated_config_resolves_the_root_and_companion_files(
@@ -419,7 +482,11 @@ def test_generated_config_resolves_the_root_and_companion_files(
     project_root: Path,
     tmp_path: Path,
 ) -> None:
-    initializer.initialize(destination=destination, project_root=project_root)
+    initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=project_root,
+    )
 
     config = ConfigLoader(source=LocalYamlConfigSource()).load(
         config_file=destination / "checksmith.yaml",
@@ -433,7 +500,7 @@ def test_generated_config_resolves_the_root_and_companion_files(
         if isinstance(argument, ConfigPath)
     }
     assert referenced_files == {
-        destination / name for name in ASSET_NAMES if name != "checksmith.yaml"
+        destination / name for name in FILE_NAMES if name != "checksmith.yaml"
     }
     assert all(path.is_file() for path in referenced_files)
     assert not tuple(project_root.iterdir())
@@ -449,15 +516,17 @@ def test_relative_paths_resolve_against_the_destination(
     monkeypatch.chdir(tmp_path)
 
     output = initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
         destination=Path("configuration"),
         project_root=Path("../project/../project"),
     )
 
     assert output.project_root == project_root
-    assert output.created_files == tuple(destination / name for name in ASSET_NAMES)
-    assert yaml.safe_load((destination / "checksmith.yaml").read_bytes())[
-        "project_root"
-    ] == "../project"
+    assert output.created_files == tuple(destination / name for name in FILE_NAMES)
+    assert (
+        yaml.safe_load((destination / "checksmith.yaml").read_bytes())["project_root"]
+        == "../project"
+    )
 
 
 def test_root_symlinks_keep_the_selected_lexical_path(
@@ -469,12 +538,17 @@ def test_root_symlinks_keep_the_selected_lexical_path(
     selected_root = tmp_path / "project alias"
     selected_root.symlink_to(project_root, target_is_directory=True)
 
-    output = initializer.initialize(destination=destination, project_root=selected_root)
+    output = initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=selected_root,
+    )
 
     assert output.project_root == selected_root
-    assert yaml.safe_load((destination / "checksmith.yaml").read_bytes())[
-        "project_root"
-    ] == "../project alias"
+    assert (
+        yaml.safe_load((destination / "checksmith.yaml").read_bytes())["project_root"]
+        == "../project alias"
+    )
 
 
 def test_only_manifest_assets_are_copied_and_unrelated_files_remain(
@@ -489,13 +563,17 @@ def test_only_manifest_assets_are_copied_and_unrelated_files_remain(
     unrelated = destination / "notes.txt"
     unrelated.write_bytes(b"keep these notes")
 
-    initializer.initialize(destination=destination, project_root=destination)
+    initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=destination,
+    )
 
-    assert {path.name for path in destination.iterdir()} == {*ASSET_NAMES, "notes.txt"}
+    assert {path.name for path in destination.iterdir()} == {*FILE_NAMES, "notes.txt"}
     assert unrelated.read_bytes() == b"keep these notes"
 
 
-@pytest.mark.parametrize("name", ASSET_NAMES)
+@pytest.mark.parametrize("name", FILE_NAMES)
 @pytest.mark.parametrize("collision_kind", ["file", "directory", "dangling symlink"])
 def test_all_collisions_fail_before_creating_any_files(
     initializer: Initializer,
@@ -513,7 +591,11 @@ def test_all_collisions_fail_before_creating_any_files(
         collision.symlink_to(destination / "missing-target")
 
     with pytest.raises(ChecksmithError) as raised:
-        initializer.initialize(destination=destination, project_root=destination)
+        initializer.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=destination,
+        )
 
     assert str(collision) in str(raised.value)
     assert tuple(destination.iterdir()) == (collision,)
@@ -533,14 +615,18 @@ def test_a_file_created_after_preflight_is_never_overwritten(
     raced = destination / "ruff.toml"
     initializer = Initializer(
         assets=PackagedAssetSource(directory=asset_directory),
-        renderer=YamlConfigRenderer(),
+        renderer=YamlConfigRenderer(distribution_version="0.1.0"),
         filesystem=CompetingFilesystem(
             filesystem=LocalInitializationFilesystem(), raced=raced
         ),
     )
 
     with pytest.raises(ChecksmithError) as raised:
-        initializer.initialize(destination=destination, project_root=destination)
+        initializer.initialize(
+            astcheck_policy=make_astcheck_policy(),
+            destination=destination,
+            project_root=destination,
+        )
 
     assert str(raced) in str(raised.value)
     assert raced.read_bytes() == b"created by another process"
@@ -554,13 +640,123 @@ def test_renderer_preserves_all_content_except_the_root_scalar(
     template: bytes,
     destination: Path,
 ) -> None:
-    rendered = YamlConfigRenderer().render(
+    rendered = YamlConfigRenderer(distribution_version="0.1.0").render(
         content=template,
         config_file=destination / "checksmith.yaml",
         project_root=destination,
     )
 
     assert rendered == template.replace(b"project_root: ../../..", b'project_root: "."')
+
+
+def test_renderer_pins_astcheck_to_the_installed_distribution_version(
+    template: bytes, destination: Path
+) -> None:
+    rendered = YamlConfigRenderer(distribution_version="2.3.4").render(
+        content=template,
+        config_file=destination / "checksmith.yaml",
+        project_root=destination,
+    )
+
+    config = Config.from_mapping(
+        document=yaml.safe_load(rendered), config_file=destination / "checksmith.yaml"
+    )
+    astcheck = next(check for check in config.checks if check.id == "astcheck")
+    assert astcheck.argv == (
+        "uvx",
+        "--from",
+        "checksmith==2.3.4",
+        "astcheck",
+        "check",
+        "--config",
+        str(destination / "astcheck.yaml"),
+        "--format",
+        "json",
+    )
+
+
+def test_generated_analysis_config_preserves_selected_policy_and_relative_root(
+    initializer: Initializer, destination: Path, project_root: Path
+) -> None:
+    policy = AnalysisPolicy(
+        sources=("src", "tools/entry.py"),
+        exclusions=("**/tests/**",),
+        plugins=(
+            PluginConfiguration(
+                id="oopcheck",
+                settings={
+                    "max_standalone_percent": 25,
+                    "min_callable_statements": 20,
+                    "min_shared_functions": 3,
+                    "collaborators": [
+                        {"name": "repository", "annotations": ["Repository", "Repo"]}
+                    ],
+                },
+            ),
+        ),
+    )
+
+    initializer.initialize(
+        destination=destination, project_root=project_root, astcheck_policy=policy
+    )
+
+    generated = yaml.safe_load((destination / "astcheck.yaml").read_text())
+    assert generated == {
+        **policy.model_dump(mode="json"),
+        "schema_version": 1,
+        "project_root": "../project",
+    }
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        b"command: other",
+        b"command: astcheck\n    package: null",
+        b"command: astcheck\n    package: [checksmith]",
+        b"command: astcheck\n    package: checksmith==0.2.0",
+    ],
+)
+def test_renderer_rejects_missing_duplicate_or_invalid_astcheck_packages(
+    template: bytes, destination: Path, replacement: bytes
+) -> None:
+    content = template.replace(b"command: astcheck", replacement)
+
+    with pytest.raises(ChecksmithError, match="ASTcheck"):
+        YamlConfigRenderer(distribution_version="0.1.0").render(
+            content=content,
+            config_file=destination / "checksmith.yaml",
+            project_root=destination,
+        )
+
+
+@pytest.mark.parametrize("checks", [b"checks: []", b"checks: {}", b"checks: [null]"])
+def test_renderer_requires_a_check_sequence_with_astcheck(
+    destination: Path, checks: bytes
+) -> None:
+    content = b"schema_version: 1\nproject_root: .\n" + checks
+
+    with pytest.raises(ChecksmithError, match="checks|ASTcheck"):
+        YamlConfigRenderer(distribution_version="0.1.0").render(
+            content=content,
+            config_file=destination / "checksmith.yaml",
+            project_root=destination,
+        )
+
+
+def test_renderer_rejects_astcheck_package_aliases(
+    template: bytes, destination: Path
+) -> None:
+    content = b"package_name: &package checksmith==0.1.0\n" + template.replace(
+        b'package: "checksmith==0.1.0"', b"package: *package"
+    )
+
+    with pytest.raises(ChecksmithError, match="not an alias"):
+        YamlConfigRenderer(distribution_version="0.1.0").render(
+            content=content,
+            config_file=destination / "checksmith.yaml",
+            project_root=destination,
+        )
 
 
 @pytest.mark.parametrize(
@@ -583,7 +779,7 @@ def test_renderer_safely_encodes_root_names_without_filesystem_access(
     project_root = destination / root_name
     config_file = destination / "checksmith.yaml"
 
-    rendered = YamlConfigRenderer().render(
+    rendered = YamlConfigRenderer(distribution_version="0.1.0").render(
         content=template,
         config_file=config_file,
         project_root=project_root,
@@ -592,9 +788,10 @@ def test_renderer_safely_encodes_root_names_without_filesystem_access(
     document: object = yaml.safe_load(rendered)
     assert isinstance(document, Mapping)
     assert document["project_root"] == root_name
-    assert Config.from_mapping(
-        document=document, config_file=config_file
-    ).project_root == project_root
+    assert (
+        Config.from_mapping(document=document, config_file=config_file).project_root
+        == project_root
+    )
     assert not tuple(destination.iterdir())
 
 
@@ -607,7 +804,7 @@ def test_renderer_rejects_unreadable_or_malformed_yaml(
     content: bytes,
 ) -> None:
     with pytest.raises(ChecksmithError):
-        YamlConfigRenderer().render(
+        YamlConfigRenderer(distribution_version="0.1.0").render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -633,7 +830,7 @@ def test_renderer_rejects_invalid_template_roots(
     content = template.replace(b"project_root: ../../..\n", replacement)
 
     with pytest.raises(ChecksmithError, match="project_root"):
-        YamlConfigRenderer().render(
+        YamlConfigRenderer(distribution_version="0.1.0").render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -647,7 +844,7 @@ def test_renderer_rejects_schema_errors(
     content = template.replace(b"schema_version: 1", b"schema_version: 999")
 
     with pytest.raises(ChecksmithError, match="schema_version"):
-        YamlConfigRenderer().render(
+        YamlConfigRenderer(distribution_version="0.1.0").render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -664,7 +861,7 @@ def test_renderer_rejects_a_root_alias_without_rewriting_the_anchored_value(
     )
 
     with pytest.raises(ChecksmithError, match="project_root"):
-        YamlConfigRenderer().render(
+        YamlConfigRenderer(distribution_version="0.1.0").render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -685,9 +882,7 @@ def test_asset_source_reads_packaged_resources(template: bytes) -> None:
 
 
 @pytest.mark.parametrize("asset_kind", ["missing", "directory"])
-def test_asset_source_propagates_read_errors(
-    tmp_path: Path, asset_kind: str
-) -> None:
+def test_asset_source_propagates_read_errors(tmp_path: Path, asset_kind: str) -> None:
     if asset_kind == "directory":
         (tmp_path / "asset").mkdir()
     source = PackagedAssetSource(directory=tmp_path)

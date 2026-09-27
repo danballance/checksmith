@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Callable, Iterable, Mapping
@@ -18,6 +19,7 @@ from typer.core import TyperGroup, TyperOption
 from typer.testing import CliRunner
 
 from checksmith import __version__
+from checksmith.astcheck_setup import AstcheckSetup
 from checksmith.checking import CheckService, CommandRegistry
 from checksmith.cli import (
     ChecksmithGroup,
@@ -57,6 +59,11 @@ from tests.commands.test_pyarchgraph import (
     report_json,
 )
 from tests.conftest import FakeProcesses, make_command_factory
+from tests.test_astcheck_setup import (
+    ConfiguredTerminal,
+    RecordingRegistry,
+    policy_document,
+)
 
 
 def test_cli_imports_the_command_factory_and_implementations(
@@ -85,8 +92,12 @@ def make_app(commands: CommandRegistry) -> typer.Typer:
             assets=PackagedAssetSource(
                 directory=files("checksmith") / "assets" / "default"
             ),
-            renderer=YamlConfigRenderer(),
+            renderer=YamlConfigRenderer(distribution_version="0.1.0"),
             filesystem=LocalInitializationFilesystem(),
+        ),
+        astcheck_setup=AstcheckSetup(
+            registry=RecordingRegistry(error=None),
+            terminal=ConfiguredTerminal(interactive=True),
         ),
         presenter=OutputPresenter(console=Console()),
         logging=LoggingConfigurator(
@@ -101,6 +112,13 @@ def make_app(commands: CommandRegistry) -> typer.Typer:
             ),
         ),
     ).build()
+
+
+@pytest.fixture
+def astcheck_policy_file(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    path = tmp_path_factory.mktemp("policies") / "policy.yaml"
+    path.write_text(yaml.safe_dump(policy_document()), encoding="utf-8")
+    return path
 
 
 @pytest.fixture
@@ -220,7 +238,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COLUMNS", "300")
 
-    result = cli_runner.invoke(app, ["init"], input="\n")
+    result = cli_runner.invoke(app, ["init"], input="\n.\n\n\n\n")
 
     assert result.exit_code == ExitCode.SUCCESS
     assert result.stderr == ""
@@ -230,6 +248,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
         "ruff.toml",
         "semgrep.yaml",
         "coverage.toml",
+        "astcheck.yaml",
     }
     assert all(
         filename in result.stdout
@@ -238,6 +257,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
             "ruff.toml",
             "semgrep.yaml",
             "coverage.toml",
+            "astcheck.yaml",
         )
     )
     config_path = tmp_path / "checksmith.yaml"
@@ -253,6 +273,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
 @pytest.mark.parametrize("absolute", [False, True])
 @pytest.mark.parametrize("prompt", [False, True])
 def test_init_selects_another_project_root_and_writes_in_the_current_directory(
+    astcheck_policy_file: Path,
     app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -267,6 +288,7 @@ def test_init_selects_another_project_root_and_writes_in_the_current_directory(
     monkeypatch.chdir(destination)
     selected_root = str(project_root) if absolute else f"../{project_root.name}"
     arguments = ["init"] if prompt else ["init", "--project-root", selected_root]
+    arguments.extend(["--astcheck-policy", str(astcheck_policy_file)])
 
     result = cli_runner.invoke(
         app,
@@ -291,6 +313,7 @@ def test_init_selects_another_project_root_and_writes_in_the_current_directory(
 @pytest.mark.parametrize("root_kind", ["missing", "file"])
 @pytest.mark.parametrize("prompt", [False, True])
 def test_init_reports_invalid_roots_without_retrying_or_creating_files(
+    astcheck_policy_file: Path,
     app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -304,6 +327,7 @@ def test_init_reports_invalid_roots_without_retrying_or_creating_files(
     before = set(tmp_path.iterdir())
     monkeypatch.chdir(tmp_path)
     arguments = ["init"] if prompt else ["init", "--project-root", str(project_root)]
+    arguments.extend(["--astcheck-policy", str(astcheck_policy_file)])
 
     result = cli_runner.invoke(
         app,
@@ -319,6 +343,7 @@ def test_init_reports_invalid_roots_without_retrying_or_creating_files(
 
 
 def test_init_refuses_collisions_without_creating_other_files(
+    astcheck_policy_file: Path,
     app: typer.Typer,
     cli_runner: CliRunner,
     tmp_path: Path,
@@ -328,7 +353,10 @@ def test_init_refuses_collisions_without_creating_other_files(
     existing_file.write_text("existing configuration", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
 
-    result = cli_runner.invoke(app, ["init", "--project-root", "."])
+    result = cli_runner.invoke(
+        app,
+        ["init", "--project-root", ".", "--astcheck-policy", str(astcheck_policy_file)],
+    )
 
     assert result.exit_code == ExitCode.ERROR
     assert result.stdout == ""
@@ -377,6 +405,93 @@ def test_init_aborts_on_keyboard_interrupt_without_creating_files(
         assert raised.value.code == ExitCode.UNHEALTHY
         assert "Aborted" in stderr.getvalue().decode("utf-8")
         assert "checksmith error:" not in stderr.getvalue().decode("utf-8")
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("arguments", "missing"),
+    [
+        (["init"], "--project-root and --astcheck-policy"),
+        (["init", "--project-root", "."], "--astcheck-policy"),
+    ],
+)
+def test_noninteractive_init_requires_explicit_root_and_policy(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: list[str],
+    missing: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ConfiguredTerminal, "is_interactive", lambda self: False)
+
+    result = cli_runner.invoke(app, arguments)
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stdout == ""
+    assert missing in result.stderr
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_noninteractive_init_reads_policy_relative_to_invocation_directory(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    astcheck_policy_file: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    destination = tmp_path / "configuration"
+    destination.mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    monkeypatch.chdir(destination)
+    monkeypatch.setattr(ConfiguredTerminal, "is_interactive", lambda self: False)
+    policy_path = Path(os.path.relpath(astcheck_policy_file, destination))
+
+    result = cli_runner.invoke(
+        app,
+        [
+            "init",
+            "--project-root",
+            "../project",
+            "--astcheck-policy",
+            str(policy_path),
+        ],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert "Source path" not in result.stdout
+    assert result.stderr == ""
+    assert yaml.safe_load((destination / "astcheck.yaml").read_text()) == {
+        **policy_document(),
+        "schema_version": 1,
+        "project_root": "../project",
+    }
+    assert yaml.safe_load(astcheck_policy_file.read_text()) == policy_document()
+
+
+def test_invalid_policy_causes_no_initialization_writes(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    astcheck_policy_file: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    astcheck_policy_file.write_text(
+        "sources: [src]\nexclusions: []\nplugins: [{id: oopcheck, settings: {}}]",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = cli_runner.invoke(
+        app,
+        ["init", "--project-root", ".", "--astcheck-policy", str(astcheck_policy_file)],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert "Invalid ASTcheck plugin configuration" in result.stderr
     assert list(tmp_path.iterdir()) == []
 
 
@@ -1807,6 +1922,7 @@ def test_init_root_option_matches_the_cli_schema_and_appears_in_help(
 
     assert result.exit_code == ExitCode.SUCCESS
     assert "--project-root" in result.stdout
+    assert "--astcheck-policy" in result.stdout
     assert "--format" not in result.stdout
     assert "current directory" in result.stdout
 

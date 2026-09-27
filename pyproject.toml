@@ -14,6 +14,10 @@ dependencies = [
 
 [project.scripts]
 checksmith = "checksmith.cli:app"
+astcheck = "astcheck.cli:app"
+
+[project.entry-points."astcheck.plugins"]
+oopcheck = "astcheck.plugins.oopcheck.plugin:OopcheckPlugin"
 
 [dependency-groups]
 dev = [
@@ -29,7 +33,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["checksmith"]
+packages = ["checksmith", "astcheck"]
 artifacts = ["checksmith/assets/**/*"]
 
 [tool.hatch.build.targets.sdist]

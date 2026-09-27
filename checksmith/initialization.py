@@ -7,6 +7,7 @@ from typing import ClassVar, Protocol
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from astcheck.domain.configuration import AnalysisConfiguration, AnalysisPolicy
 from checksmith.config import Config
 from checksmith.errors import ChecksmithError
 from checksmith.outputs.initoutput import InitOutput
@@ -50,6 +51,9 @@ class PackagedAssetSource:
 
 
 class YamlConfigRenderer:
+    def __init__(self, distribution_version: str) -> None:
+        self._distribution_version = distribution_version
+
     def render(
         self,
         *,
@@ -66,7 +70,9 @@ class YamlConfigRenderer:
             ) from error
 
         if not isinstance(document, yaml.MappingNode):
-            raise ChecksmithError("Bundled checksmith.yaml must contain a YAML mapping.")
+            raise ChecksmithError(
+                "Bundled checksmith.yaml must contain a YAML mapping."
+            )
         roots = tuple(
             (key, value)
             for key, value in document.value
@@ -87,11 +93,20 @@ class YamlConfigRenderer:
             )
 
         relative_root = os.path.relpath(project_root, config_file.parent)
-        rendered = (
-            text[:root.start_mark.index]
-            + yaml.safe_dump(relative_root, default_style='"').rstrip("\n")
-            + text[root.end_mark.index:]
+        package = self._astcheck_package(document=document)
+        replacements = (
+            (root, relative_root),
+            (package, f"checksmith=={self._distribution_version}"),
         )
+        rendered = text
+        for node, value in sorted(
+            replacements, key=lambda item: item[0].start_mark.index, reverse=True
+        ):
+            rendered = (
+                rendered[: node.start_mark.index]
+                + yaml.safe_dump(value, default_style='"').rstrip("\n")
+                + rendered[node.end_mark.index :]
+            )
         try:
             generated: object = yaml.safe_load(rendered)
         except yaml.YAMLError as error:
@@ -104,6 +119,44 @@ class YamlConfigRenderer:
             )
         Config.from_mapping(document=generated, config_file=config_file)
         return rendered.encode("utf-8")
+
+    def _astcheck_package(self, *, document: yaml.MappingNode) -> yaml.ScalarNode:
+        checks = tuple(
+            value
+            for key, value in document.value
+            if isinstance(key, yaml.ScalarNode) and key.value == "checks"
+        )
+        if len(checks) != 1 or not isinstance(checks[0], yaml.SequenceNode):
+            raise ChecksmithError("Bundled checksmith.yaml must declare checks.")
+        packages: list[yaml.ScalarNode] = []
+        for check in checks[0].value:
+            if not isinstance(check, yaml.MappingNode):
+                continue
+            is_astcheck = any(
+                isinstance(key, yaml.ScalarNode)
+                and key.value == "command"
+                and isinstance(value, yaml.ScalarNode)
+                and value.value == "astcheck"
+                for key, value in check.value
+            )
+            if not is_astcheck:
+                continue
+            for key, value in check.value:
+                if isinstance(key, yaml.ScalarNode) and key.value == "package":
+                    if (
+                        not isinstance(value, yaml.ScalarNode)
+                        or value.tag != "tag:yaml.org,2002:str"
+                        or value.start_mark.index < key.end_mark.index
+                    ):
+                        raise ChecksmithError(
+                            "Bundled ASTcheck package must be a string, not an alias."
+                        )
+                    packages.append(value)
+        if len(packages) != 1:
+            raise ChecksmithError(
+                "Bundled checksmith.yaml must declare exactly one ASTcheck package."
+            )
+        return packages[0]
 
 
 class LocalInitializationFilesystem:
@@ -125,6 +178,7 @@ class Initializer:
         "semgrep.yaml",
         "coverage.toml",
     )
+    GENERATED_NAMES: ClassVar[tuple[str, ...]] = ("astcheck.yaml",)
 
     def __init__(
         self,
@@ -136,14 +190,24 @@ class Initializer:
         self._renderer = renderer
         self._filesystem = filesystem
 
-    def initialize(self, *, destination: Path, project_root: Path) -> InitOutput:
+    def initialize(
+        self,
+        *,
+        destination: Path,
+        project_root: Path,
+        astcheck_policy: AnalysisPolicy,
+    ) -> InitOutput:
         destination = Path(os.path.abspath(destination))
         project_root = Path(os.path.normpath(destination / project_root))
         self._require_directory(path=destination, label="Initialization destination")
         self._require_directory(path=project_root, label="Project root")
 
-        destinations = tuple(destination / name for name in self.ASSET_NAMES)
-        collisions = tuple(path for path in destinations if self._entry_exists(path=path))
+        destinations = tuple(
+            destination / name for name in self.ASSET_NAMES + self.GENERATED_NAMES
+        )
+        collisions = tuple(
+            path for path in destinations if self._entry_exists(path=path)
+        )
         if collisions:
             raise ChecksmithError(
                 "Refusing to overwrite existing paths: "
@@ -151,7 +215,9 @@ class Initializer:
             )
 
         prepared = tuple(
-            self._prepare_file(path=path, project_root=project_root)
+            self._prepare_file(
+                path=path, project_root=project_root, astcheck_policy=astcheck_policy
+            )
             for path in destinations
         )
         for file in prepared:
@@ -178,7 +244,27 @@ class Initializer:
         except OSError as error:
             raise ChecksmithError(f"Could not inspect {path}: {error}") from error
 
-    def _prepare_file(self, *, path: Path, project_root: Path) -> PreparedFile:
+    def _prepare_file(
+        self,
+        *,
+        path: Path,
+        project_root: Path,
+        astcheck_policy: AnalysisPolicy,
+    ) -> PreparedFile:
+        if path.name == "astcheck.yaml":
+            configuration = AnalysisConfiguration(
+                schema_version=1,
+                project_root=Path(os.path.relpath(project_root, path.parent)),
+                sources=astcheck_policy.sources,
+                exclusions=astcheck_policy.exclusions,
+                plugins=astcheck_policy.plugins,
+            )
+            return PreparedFile(
+                path=path,
+                content=yaml.safe_dump(
+                    configuration.model_dump(mode="json"), sort_keys=False
+                ).encode("utf-8"),
+            )
         try:
             content = self._assets.read(name=path.name)
         except OSError as error:
