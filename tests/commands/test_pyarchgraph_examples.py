@@ -62,17 +62,13 @@ import sys
 from pathlib import Path
 
 from examples.custom_strategies import PackageGroupingView
-from pyarchgraph import (
-    AnalysisOptions,
-    ApplicationFactory,
-    CheckContext,
-    CheckRegistration,
-    CheckResult,
-    JsonReportRenderer,
-    RuleFinding,
-    Severity,
-    ViewRegistration,
-)
+from pyarchgraph.adapters.driving.cli.application import CliExitCodePolicy
+from pyarchgraph.adapters.driving.cli.rendering import JsonReportRenderer
+from pyarchgraph.application.requests import AnalysisOptions, AnalysisRequest
+from pyarchgraph.application.strategies import CheckRegistration, ViewRegistration
+from pyarchgraph.domain.graph import CheckContext
+from pyarchgraph.domain.models import CheckResult, RuleFinding, Severity
+from pyarchgraph.main import ApplicationFactory
 
 
 class ProjectReviewCheck:
@@ -111,12 +107,14 @@ factory = ApplicationFactory(
     },
 )
 report = factory.create_analyzer().analyse(
-    (Path("."),),
-    options=AnalysisOptions(gate=sys.argv[4], details="component-edges"),
-    base_dir=Path(sys.argv[1]),
+    AnalysisRequest(
+        (Path("."),),
+        options=AnalysisOptions(gate=sys.argv[4], details="component-edges"),
+        base_dir=Path(sys.argv[1]),
+    )
 )
 print(JsonReportRenderer().render(report))
-raise SystemExit(report.exit_code)
+raise SystemExit(CliExitCodePolicy().exit_code(report))
 """
 
 
