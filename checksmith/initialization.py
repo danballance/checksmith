@@ -51,9 +51,6 @@ class PackagedAssetSource:
 
 
 class YamlConfigRenderer:
-    def __init__(self, distribution_version: str) -> None:
-        self._distribution_version = distribution_version
-
     def render(
         self,
         *,
@@ -93,20 +90,11 @@ class YamlConfigRenderer:
             )
 
         relative_root = os.path.relpath(project_root, config_file.parent)
-        package = self._astcheck_package(document=document)
-        replacements = (
-            (root, relative_root),
-            (package, f"checksmith=={self._distribution_version}"),
+        rendered = (
+            text[: root.start_mark.index]
+            + yaml.safe_dump(relative_root, default_style='"').rstrip("\n")
+            + text[root.end_mark.index :]
         )
-        rendered = text
-        for node, value in sorted(
-            replacements, key=lambda item: item[0].start_mark.index, reverse=True
-        ):
-            rendered = (
-                rendered[: node.start_mark.index]
-                + yaml.safe_dump(value, default_style='"').rstrip("\n")
-                + rendered[node.end_mark.index :]
-            )
         try:
             generated: object = yaml.safe_load(rendered)
         except yaml.YAMLError as error:
@@ -119,44 +107,6 @@ class YamlConfigRenderer:
             )
         Config.from_mapping(document=generated, config_file=config_file)
         return rendered.encode("utf-8")
-
-    def _astcheck_package(self, *, document: yaml.MappingNode) -> yaml.ScalarNode:
-        checks = tuple(
-            value
-            for key, value in document.value
-            if isinstance(key, yaml.ScalarNode) and key.value == "checks"
-        )
-        if len(checks) != 1 or not isinstance(checks[0], yaml.SequenceNode):
-            raise ChecksmithError("Bundled checksmith.yaml must declare checks.")
-        packages: list[yaml.ScalarNode] = []
-        for check in checks[0].value:
-            if not isinstance(check, yaml.MappingNode):
-                continue
-            is_astcheck = any(
-                isinstance(key, yaml.ScalarNode)
-                and key.value == "command"
-                and isinstance(value, yaml.ScalarNode)
-                and value.value == "astcheck"
-                for key, value in check.value
-            )
-            if not is_astcheck:
-                continue
-            for key, value in check.value:
-                if isinstance(key, yaml.ScalarNode) and key.value == "package":
-                    if (
-                        not isinstance(value, yaml.ScalarNode)
-                        or value.tag != "tag:yaml.org,2002:str"
-                        or value.start_mark.index < key.end_mark.index
-                    ):
-                        raise ChecksmithError(
-                            "Bundled ASTcheck package must be a string, not an alias."
-                        )
-                    packages.append(value)
-        if len(packages) != 1:
-            raise ChecksmithError(
-                "Bundled checksmith.yaml must declare exactly one ASTcheck package."
-            )
-        return packages[0]
 
 
 class LocalInitializationFilesystem:

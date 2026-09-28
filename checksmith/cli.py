@@ -2,7 +2,6 @@
 
 import logging
 import os
-from importlib.metadata import version
 from importlib.resources import files
 from pathlib import Path
 from typing import Annotated, Any, Final
@@ -286,7 +285,7 @@ app = CliApplication(
         assets=PackagedAssetSource(
             directory=files("checksmith") / "assets" / "default"
         ),
-        renderer=YamlConfigRenderer(distribution_version=version("checksmith")),
+        renderer=YamlConfigRenderer(),
         filesystem=LocalInitializationFilesystem(),
     ),
     astcheck_setup=AstcheckSetup(

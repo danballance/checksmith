@@ -57,6 +57,37 @@ def test_the_starter_config_loads_through_the_real_loader(
     )
 
 
+def test_the_starter_config_runs_astcheck_from_the_checksmith_git_package(
+    default_assets: Path,
+) -> None:
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+    astcheck = next(
+        check for check in config.checks if check.command is CommandName.ASTCHECK
+    )
+
+    assert astcheck.package_type is PackageType.UVX
+    assert astcheck.package == (
+        "checksmith @ git+https://github.com/danballance/checksmith@main"
+    )
+    assert astcheck.argv == (
+        "uvx",
+        "--isolated",
+        "--refresh-package",
+        "checksmith",
+        "--from",
+        "checksmith @ git+https://github.com/danballance/checksmith@main",
+        "astcheck",
+        "check",
+        "--config",
+        str(default_assets / "astcheck.yaml"),
+        "--format",
+        "json",
+    )
+
+
 def test_the_starter_config_enforces_cognitive_complexity(
     default_assets: Path,
 ) -> None:

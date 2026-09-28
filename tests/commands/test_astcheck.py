@@ -68,7 +68,7 @@ ERROR_REPORT = AnalysisReport(
 ).model_dump_json()
 
 
-def test_command_runs_astcheck_from_the_checksmith_distribution(
+def test_command_runs_astcheck_from_the_checksmith_git_package(
     tmp_path: Path,
     processes: FakeProcesses,
     command_factory: CommandFactory,
@@ -76,7 +76,7 @@ def test_command_runs_astcheck_from_the_checksmith_distribution(
     check = Check(
         id="custom-analysis",
         package_type=PackageType.UVX,
-        package="checksmith==0.1.0",
+        package="checksmith @ git+https://github.com/danballance/checksmith@main",
         command=CommandName.ASTCHECK,
         args=("check", "--config", "astcheck.yaml", "--format", "json"),
     )
@@ -89,8 +89,11 @@ def test_command_runs_astcheck_from_the_checksmith_distribution(
     assert result.status is CheckStatus.PASSED
     assert processes.started[0].argv == (
         "uvx",
+        "--isolated",
+        "--refresh-package",
+        "checksmith",
         "--from",
-        "checksmith==0.1.0",
+        "checksmith @ git+https://github.com/danballance/checksmith@main",
         "astcheck",
         "check",
         "--config",

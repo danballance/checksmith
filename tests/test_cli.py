@@ -99,7 +99,7 @@ def make_app(commands: CommandRegistry) -> typer.Typer:
             assets=PackagedAssetSource(
                 directory=files("checksmith") / "assets" / "default"
             ),
-            renderer=YamlConfigRenderer(distribution_version="0.1.0"),
+            renderer=YamlConfigRenderer(),
             filesystem=LocalInitializationFilesystem(),
         ),
         astcheck_setup=AstcheckSetup(

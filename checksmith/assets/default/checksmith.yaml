@@ -7,7 +7,7 @@ project_root: ../../..
 checks:
   - id: astcheck
     package_type: uvx
-    package: "checksmith==0.1.0"
+    package: "checksmith @ git+https://github.com/danballance/checksmith@main"
     command: astcheck
 
     args:

@@ -183,7 +183,7 @@ def asset_directory(tmp_path: Path) -> Path:
 def initializer(asset_directory: Path) -> Initializer:
     return Initializer(
         assets=PackagedAssetSource(directory=asset_directory),
-        renderer=YamlConfigRenderer(distribution_version="0.1.0"),
+        renderer=YamlConfigRenderer(),
         filesystem=LocalInitializationFilesystem(),
     )
 
@@ -691,7 +691,7 @@ def test_a_file_created_after_preflight_is_never_overwritten(
     raced = destination / "ruff.toml"
     initializer = Initializer(
         assets=PackagedAssetSource(directory=asset_directory),
-        renderer=YamlConfigRenderer(distribution_version="0.1.0"),
+        renderer=YamlConfigRenderer(),
         filesystem=CompetingFilesystem(
             filesystem=LocalInitializationFilesystem(), raced=raced
         ),
@@ -716,7 +716,7 @@ def test_renderer_preserves_all_content_except_the_root_scalar(
     template: bytes,
     destination: Path,
 ) -> None:
-    rendered = YamlConfigRenderer(distribution_version="0.1.0").render(
+    rendered = YamlConfigRenderer().render(
         content=template,
         config_file=destination / "checksmith.yaml",
         project_root=destination,
@@ -725,10 +725,10 @@ def test_renderer_preserves_all_content_except_the_root_scalar(
     assert rendered == template.replace(b"project_root: ../../..", b'project_root: "."')
 
 
-def test_renderer_pins_astcheck_to_the_installed_distribution_version(
+def test_renderer_preserves_the_astcheck_git_requirement(
     template: bytes, destination: Path
 ) -> None:
-    rendered = YamlConfigRenderer(distribution_version="2.3.4").render(
+    rendered = YamlConfigRenderer().render(
         content=template,
         config_file=destination / "checksmith.yaml",
         project_root=destination,
@@ -738,10 +738,17 @@ def test_renderer_pins_astcheck_to_the_installed_distribution_version(
         document=yaml.safe_load(rendered), config_file=destination / "checksmith.yaml"
     )
     astcheck = next(check for check in config.checks if check.id == "astcheck")
+    assert astcheck.package_type is PackageType.UVX
+    assert astcheck.package == (
+        "checksmith @ git+https://github.com/danballance/checksmith@main"
+    )
     assert astcheck.argv == (
         "uvx",
+        "--isolated",
+        "--refresh-package",
+        "checksmith",
         "--from",
-        "checksmith==2.3.4",
+        "checksmith @ git+https://github.com/danballance/checksmith@main",
         "astcheck",
         "check",
         "--config",
@@ -749,6 +756,18 @@ def test_renderer_pins_astcheck_to_the_installed_distribution_version(
         "--format",
         "json",
     )
+
+
+@pytest.mark.parametrize("checks", [b"checks: []", b"checks: {}", b"checks: [null]"])
+def test_renderer_rejects_invalid_checks(destination: Path, checks: bytes) -> None:
+    content = b"schema_version: 1\nproject_root: .\n" + checks
+
+    with pytest.raises(ChecksmithError, match="checks"):
+        YamlConfigRenderer().render(
+            content=content,
+            config_file=destination / "checksmith.yaml",
+            project_root=destination,
+        )
 
 
 def test_generated_analysis_config_preserves_selected_policy_and_relative_root(
@@ -785,57 +804,6 @@ def test_generated_analysis_config_preserves_selected_policy_and_relative_root(
 
 
 @pytest.mark.parametrize(
-    "replacement",
-    [
-        b"command: other",
-        b"command: astcheck\n    package: null",
-        b"command: astcheck\n    package: [checksmith]",
-        b"command: astcheck\n    package: checksmith==0.2.0",
-    ],
-)
-def test_renderer_rejects_missing_duplicate_or_invalid_astcheck_packages(
-    template: bytes, destination: Path, replacement: bytes
-) -> None:
-    content = template.replace(b"command: astcheck", replacement)
-
-    with pytest.raises(ChecksmithError, match="ASTcheck"):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
-            content=content,
-            config_file=destination / "checksmith.yaml",
-            project_root=destination,
-        )
-
-
-@pytest.mark.parametrize("checks", [b"checks: []", b"checks: {}", b"checks: [null]"])
-def test_renderer_requires_a_check_sequence_with_astcheck(
-    destination: Path, checks: bytes
-) -> None:
-    content = b"schema_version: 1\nproject_root: .\n" + checks
-
-    with pytest.raises(ChecksmithError, match="checks|ASTcheck"):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
-            content=content,
-            config_file=destination / "checksmith.yaml",
-            project_root=destination,
-        )
-
-
-def test_renderer_rejects_astcheck_package_aliases(
-    template: bytes, destination: Path
-) -> None:
-    content = b"package_name: &package checksmith==0.1.0\n" + template.replace(
-        b'package: "checksmith==0.1.0"', b"package: *package"
-    )
-
-    with pytest.raises(ChecksmithError, match="not an alias"):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
-            content=content,
-            config_file=destination / "checksmith.yaml",
-            project_root=destination,
-        )
-
-
-@pytest.mark.parametrize(
     "root_name",
     [
         "project space",
@@ -855,7 +823,7 @@ def test_renderer_safely_encodes_root_names_without_filesystem_access(
     project_root = destination / root_name
     config_file = destination / "checksmith.yaml"
 
-    rendered = YamlConfigRenderer(distribution_version="0.1.0").render(
+    rendered = YamlConfigRenderer().render(
         content=template,
         config_file=config_file,
         project_root=project_root,
@@ -880,7 +848,7 @@ def test_renderer_rejects_unreadable_or_malformed_yaml(
     content: bytes,
 ) -> None:
     with pytest.raises(ChecksmithError):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
+        YamlConfigRenderer().render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -906,7 +874,7 @@ def test_renderer_rejects_invalid_template_roots(
     content = template.replace(b"project_root: ../../..\n", replacement)
 
     with pytest.raises(ChecksmithError, match="project_root"):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
+        YamlConfigRenderer().render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -920,7 +888,7 @@ def test_renderer_rejects_schema_errors(
     content = template.replace(b"schema_version: 1", b"schema_version: 999")
 
     with pytest.raises(ChecksmithError, match="schema_version"):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
+        YamlConfigRenderer().render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
@@ -937,7 +905,7 @@ def test_renderer_rejects_a_root_alias_without_rewriting_the_anchored_value(
     )
 
     with pytest.raises(ChecksmithError, match="project_root"):
-        YamlConfigRenderer(distribution_version="0.1.0").render(
+        YamlConfigRenderer().render(
             content=content,
             config_file=destination / "checksmith.yaml",
             project_root=destination,
