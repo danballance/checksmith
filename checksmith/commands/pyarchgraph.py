@@ -107,7 +107,9 @@ class RuleFinding(ReportModel):
 
     def validate_references(self, nodes: set[str], sources: set[str]) -> None:
         _require_known_references(set(self.node_ids), nodes, "rule node references")
-        _require_known_references(set(self.source_ids), sources, "rule source references")
+        _require_known_references(
+            set(self.source_ids), sources, "rule source references"
+        )
         for evidence in self.evidence:
             evidence.validate_sources(sources)
 
@@ -229,11 +231,15 @@ class PyArchGraphReport(ReportModel):
             ):
                 raise ValueError("complete reports must contain only analyzed sources")
             if self.coverage.analyzed_source_count != len(self.sources):
-                raise ValueError("complete report analyzed source count must match sources")
+                raise ValueError(
+                    "complete report analyzed source count must match sources"
+                )
             if any(item.severity == "error" for item in self.coverage.diagnostics):
                 raise ValueError("complete reports cannot contain error diagnostics")
             if any(not item.acknowledged for item in self.coverage.boundaries):
-                raise ValueError("complete reports cannot contain unacknowledged boundaries")
+                raise ValueError(
+                    "complete reports cannot contain unacknowledged boundaries"
+                )
         for view in self.views.values():
             view.validate_references(sources)
         for boundary in self.coverage.boundaries:
@@ -290,26 +296,45 @@ class PyArchGraphCommand(CapturedOutputCommand):
         status = (
             CheckStatus.ERROR
             if incomplete
-            else CheckStatus.FAILED if has_errors else CheckStatus.PASSED
+            else CheckStatus.FAILED
+            if has_errors
+            else CheckStatus.PASSED
         )
-        summary = (
-            f"Analysis is {report.status}; gate: {report.gate}; "
-            f"sources: {len(report.sources)}; "
-            f"analyzed: {report.coverage.analyzed_source_count}."
+        return CheckResult(
+            check_id=check_id, status=status, messages=self._report_messages(report)
         )
-        messages = [summary, self._view_message(report.gate, selected, True)]
-        for gate in sorted(report.views):
-            if gate != report.gate:
-                messages.append(
-                    self._view_message(gate, report.views[gate], False)
-                )
-        messages.extend(
-            self._diagnostic_message(diagnostic)
-            for diagnostic in report.coverage.diagnostics
+
+    def _report_messages(self, report: PyArchGraphReport) -> tuple[str, ...]:
+        selected = report.views[report.gate]
+        incomplete = report.status == "incomplete"
+        errors = sum(item.severity == "error" for item in selected.findings)
+        outcome = (
+            "Analysis incomplete; findings are partial."
+            if incomplete
+            else f"{errors} error finding{'s' if errors != 1 else ''}."
+            if errors
+            else "No error findings."
         )
-        messages.extend(
-            self._boundary_message(boundary) for boundary in report.coverage.boundaries
-        )
+        messages = [
+            f"{report.gate}: {outcome}",
+            (
+                f"Selected view: {report.gate} (determines pass/fail)\n"
+                f"  {self._view_description(report.gate)}\n"
+                f"  Analysis: {report.status}; source files analyzed: "
+                f"{report.coverage.analyzed_source_count}/{len(report.sources)}.\n"
+                f"  {self._view_counts(selected)}\n"
+                f"  Enabled checks: {', '.join(selected.enabled_check_ids) or '(none)'}."
+            ),
+        ]
+        if report.gate in (
+            "package-structural",
+            "package-non-typing",
+            "package-module-body",
+        ):
+            messages[1] += (
+                "\n  Package groups combine modules; cycles between groups can exist "
+                "even when individual modules have no cycles."
+            )
         source_labels = {
             source.id: source.import_name
             if source.import_name is not None
@@ -317,21 +342,88 @@ class PyArchGraphCommand(CapturedOutputCommand):
             for source in report.sources
         }
         node_labels = {node.id: node.label for node in selected.nodes}
-        prefix = "Partial observation: " if incomplete else ""
-        messages.extend(
-            prefix
-            + f"{registered.severity.capitalize()} [{registered.check_id}]: "
-            + self._finding_message(registered.finding, node_labels, source_labels)
-            for registered in selected.findings
-        )
-        return CheckResult(check_id=check_id, status=status, messages=tuple(messages))
+        for index, registered in enumerate(selected.findings, start=1):
+            prefix = "Partial observation - " if incomplete else ""
+            messages.append(
+                f"{prefix}Finding {index} of {len(selected.findings)}: "
+                f"{registered.severity.capitalize()} [{registered.check_id}]\n"
+                + self._finding_message(registered.finding, node_labels, source_labels)
+            )
+        if report.coverage.diagnostics:
+            messages.append(
+                "Analysis diagnostics (source discovery and parsing)\n"
+                + "\n".join(
+                    self._diagnostic_message(item)
+                    for item in report.coverage.diagnostics
+                )
+            )
+        if report.coverage.boundaries:
+            messages.append(
+                "Analysis boundaries\n"
+                + "\n".join(
+                    self._boundary_message(item) for item in report.coverage.boundaries
+                )
+            )
+        other_views = sorted(set(report.views) - {report.gate})
+        if other_views:
+            messages.append(
+                "Other views (information only; do not affect this result)\n"
+                + "\n".join(
+                    f"  {gate}: {self._view_counts(report.views[gate])}"
+                    for gate in other_views
+                )
+                + "\n  View key: structural = all explicit imports; "
+                "non-typing = excludes typing-only imports; "
+                "module-body = also excludes imports inside functions/methods."
+                "\n  The package- prefix groups modules by their immediate package; "
+                "standalone modules remain individual nodes."
+            )
+        if report.coverage.limitations:
+            messages.append(
+                "Analysis limitations\n"
+                + "\n".join(f"  - {item}" for item in report.coverage.limitations)
+            )
+        return tuple(messages)
 
-    def _view_message(self, gate: str, view: GraphView, selected: bool) -> str:
-        label = "Selected view" if selected else "Informational view"
+    def _view_description(self, gate: str) -> str:
+        match gate:
+            case "structural" | "package-structural":
+                scope = (
+                    "All explicit imports, including typing-only and function-local."
+                )
+            case "non-typing" | "package-non-typing":
+                scope = "Excludes typing-only imports; includes function-local imports."
+            case "module-body" | "package-module-body":
+                scope = "Excludes typing-only imports and imports in functions/methods."
+            case _:
+                return (
+                    "Custom graph view; nodes and checks are defined by the producer."
+                )
+        grouping = (
+            "Grouped by immediate package; standalone modules remain separate."
+            if gate.startswith("package-")
+            else "Each node represents a source module."
+        )
+        return f"{grouping}\n  {scope}"
+
+    def _view_counts(self, view: GraphView) -> str:
+        severities = ", ".join(
+            f"{label}: {count}"
+            for severity, label in (
+                ("error", "errors"),
+                ("warning", "warnings"),
+                ("info", "info"),
+            )
+            if (count := sum(item.severity == severity for item in view.findings))
+        )
         return (
-            f"{label} ({gate}): dependencies: {view.dependency_count}; "
-            f"cyclic nodes: {view.cyclic_node_count}; "
-            f"findings: {len(view.findings)}."
+            f"{view.dependency_count} "
+            f"{'dependency' if view.dependency_count == 1 else 'dependencies'}; "
+            f"{view.cyclic_node_count} "
+            f"node{'s' if view.cyclic_node_count != 1 else ''} in cycles; "
+            f"{len(view.findings)} finding{'s' if len(view.findings) != 1 else ''}"
+            + (f" ({severities})" if severities else "")
+            + "."
         )
 
     def _diagnostic_message(self, diagnostic: Diagnostic) -> str:
@@ -340,25 +432,25 @@ class PyArchGraphCommand(CapturedOutputCommand):
             location += f":{diagnostic.line}"
         if diagnostic.column is not None:
             location += f":{diagnostic.column}"
-        prefix = f"{location}: " if location else ""
         return (
-            f"{prefix}{diagnostic.severity.capitalize()} [{diagnostic.code}]: "
-            f"{diagnostic.message}"
+            f"  {diagnostic.severity.capitalize()} [{diagnostic.code}]\n"
+            + (f"    Location: {location}\n" if location else "")
+            + f"    {diagnostic.message}"
         )
 
     def _boundary_message(self, boundary: TargetBoundary) -> str:
         accepted = "Acknowledged" if boundary.acknowledged else "Unacknowledged"
         location = f" ({boundary.path})" if boundary.path is not None else ""
         evidence = (
-            f" {self._evidence_text(boundary.evidence)}" if boundary.evidence else ""
+            f"\n{self._evidence_text(boundary.evidence)}" if boundary.evidence else ""
         )
         return (
-            f"{accepted} {boundary.kind} boundary {boundary.name}{location}: "
-            f"{boundary.reason}.{evidence}"
+            f"  {accepted} {boundary.kind} boundary {boundary.name}{location}\n"
+            f"    {boundary.reason}{evidence}"
         )
 
     def _evidence_text(self, evidence: tuple[ImportEvidence, ...]) -> str:
-        locations = []
+        locations: list[str] = []
         for item in evidence:
             context = item.context
             labels = [
@@ -373,12 +465,14 @@ class PyArchGraphCommand(CapturedOutputCommand):
                 )
                 if enabled
             ]
-            locations.append(
-                f"{item.path}:{item.line}:{item.column}"
-                + (f" ({item.source_segment})" if item.source_segment else "")
-                + (f" [{', '.join(labels)}]" if labels else "")
-            )
-        return "; ".join(locations)
+            locations.append(f"      {item.path}:{item.line}:{item.column}")
+            if item.source_segment:
+                locations.extend(
+                    f"        {line}" for line in item.source_segment.splitlines()
+                )
+            if labels:
+                locations.append(f"        Context: {', '.join(labels)}")
+        return "\n".join(locations)
 
     def _finding_message(
         self,
@@ -388,40 +482,43 @@ class PyArchGraphCommand(CapturedOutputCommand):
     ) -> str:
         if isinstance(finding, ImportFinding):
             message = (
-                f"Unresolved import in {sources[finding.source]}: {finding.message} "
-                f"[{finding.code}]."
+                f"  Unresolved import in {sources[finding.source]}\n"
+                f"  {finding.message} [{finding.code}]"
             )
+            if finding.requested is not None:
+                message += f"\n  Requested import: {finding.requested}"
             if finding.evidence:
-                message += f" {self._evidence_text(finding.evidence)}"
+                message += (
+                    f"\n  Import locations:\n{self._evidence_text(finding.evidence)}"
+                )
             return message
         if isinstance(finding, RuleFinding):
             return self._rule_message(finding, nodes, sources)
-        edges = (
-            finding.witness if finding.dependencies is None else finding.dependencies
-        )
-        label = "Witness" if finding.dependencies is None else "Component dependencies"
-        dependencies = "; ".join(
-            f"{nodes[edge.source]} -> {nodes[edge.target]} "
-            f"at {self._evidence_text(edge.evidence)}"
-            for edge in edges
-        )
+        lines = [f"  Cycle group ({finding.certainty})"]
         if finding.definite_members:
-            definite = ", ".join(nodes[member] for member in finding.definite_members)
-            summary = f"Definite cyclic nodes: {definite}."
-            possible_members = tuple(
-                member
-                for member in finding.members
-                if member not in finding.definite_members
+            lines.append("  Confirmed cyclic nodes:")
+            lines.extend(
+                f"    - {nodes[member]}" for member in finding.definite_members
             )
-            if possible_members:
-                summary += (
-                    " Other component nodes with possible cycle involvement: "
-                    f"{', '.join(nodes[member] for member in possible_members)}."
-                )
+        possible_members = tuple(
+            member
+            for member in finding.members
+            if member not in finding.definite_members
+        )
+        if possible_members:
+            lines.append("  Nodes with possible cycle involvement:")
+            lines.extend(f"    - {nodes[member]}" for member in possible_members)
+        lines.append(f"  Dependencies in this group: {finding.dependency_count}.")
+        if finding.dependencies is None:
+            edges = finding.witness
+            lines.append("  Example cycle (witness; may cover only part of the group):")
         else:
-            members = ", ".join(nodes[member] for member in finding.members)
-            summary = f"Possible dependency cycle among {members}."
-        return f"{summary} {label}: {dependencies}"
+            edges = finding.dependencies
+            lines.append("  All dependencies in this group:")
+        for index, edge in enumerate(edges, start=1):
+            lines.append(f"    {index}. {nodes[edge.source]} -> {nodes[edge.target]}")
+            lines.append(self._evidence_text(edge.evidence))
+        return "\n".join(lines)
 
     def _rule_message(
         self,
@@ -429,15 +526,14 @@ class PyArchGraphCommand(CapturedOutputCommand):
         nodes: dict[str, str],
         sources: dict[str, str],
     ) -> str:
-        messages = [f"{finding.message} [{finding.code}]."]
+        messages = [f"  {finding.message} [{finding.code}]"]
         if finding.node_ids:
-            messages.append(
-                f"Nodes: {', '.join(nodes[node] for node in finding.node_ids)}."
-            )
+            messages.append("  Nodes:")
+            messages.extend(f"    - {nodes[node]}" for node in finding.node_ids)
         if finding.source_ids:
-            messages.append(
-                f"Sources: {', '.join(sources[source] for source in finding.source_ids)}."
-            )
+            messages.append("  Sources:")
+            messages.extend(f"    - {sources[source]}" for source in finding.source_ids)
         if finding.evidence:
+            messages.append("  Import locations:")
             messages.append(self._evidence_text(finding.evidence))
-        return " ".join(messages)
+        return "\n".join(messages)

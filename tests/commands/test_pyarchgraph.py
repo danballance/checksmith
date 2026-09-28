@@ -150,11 +150,33 @@ def report_json(*, findings: list[JsonValue]) -> str:
 
 HEALTHY_REPORT = report_json(findings=[])
 HEALTHY_MESSAGES = (
-    "Analysis is complete; gate: structural; sources: 2; analyzed: 2.",
-    "Selected view (structural): dependencies: 2; cyclic nodes: 0; findings: 0.",
-    "Informational view (module-body): dependencies: 2; cyclic nodes: 0; findings: 0.",
-    "Informational view (non-typing): dependencies: 2; cyclic nodes: 0; findings: 0.",
+    "structural: No error findings.",
+    (
+        "Selected view: structural (determines pass/fail)\n"
+        "  Each node represents a source module.\n"
+        "  All explicit imports, including typing-only and function-local.\n"
+        "  Analysis: complete; source files analyzed: 2/2.\n"
+        "  2 dependencies; 0 nodes in cycles; 0 findings.\n"
+        "  Enabled checks: cycles, unresolved-imports."
+    ),
+    (
+        "Other views (information only; do not affect this result)\n"
+        "  module-body: 2 dependencies; 0 nodes in cycles; 0 findings.\n"
+        "  non-typing: 2 dependencies; 0 nodes in cycles; 0 findings.\n"
+        "  View key: structural = all explicit imports; "
+        "non-typing = excludes typing-only imports; "
+        "module-body = also excludes imports inside functions/methods.\n"
+        "  The package- prefix groups modules by their immediate package; "
+        "standalone modules remain individual nodes."
+    ),
+    "Analysis limitations\n  - Only explicit import statements are analyzed.",
 )
+
+
+def report_section(messages: tuple[str, ...], prefix: str) -> str:
+    sections = tuple(message for message in messages if message.startswith(prefix))
+    assert len(sections) == 1
+    return sections[0]
 
 
 def custom_report_json(*, severity: Literal["error", "warning", "info"]) -> str:
@@ -240,11 +262,17 @@ def test_command_uses_normal_subprocess_execution(
 @pytest.mark.parametrize(
     ("finding", "message"),
     [
-        (cycle_finding("definite"), "Definite cyclic nodes: app, service"),
-        (cycle_finding("possible"), "Possible dependency cycle among app, service"),
+        (
+            cycle_finding("definite"),
+            "Confirmed cyclic nodes:\n    - app\n    - service",
+        ),
+        (
+            cycle_finding("possible"),
+            "Nodes with possible cycle involvement:\n    - app\n    - service",
+        ),
         (
             import_finding(),
-            "Unresolved import in app: Import needs review",
+            "Unresolved import in app\n  Import needs review",
         ),
     ],
 )
@@ -265,26 +293,44 @@ def test_each_finding_fails_with_actionable_locations(
     assert result.status is CheckStatus.FAILED
     assert result.check_id == "architecture"
     assert len(result.messages) == 5
-    assert message in result.messages[-1]
-    assert "src/app.py:3:1" in result.messages[-1]
+    finding_message = report_section(result.messages, "Finding 1 of 1:")
+    assert message in finding_message
+    assert "src/app.py:3:1" in finding_message
 
 
 def test_all_evidence_and_findings_are_reported(
     tmp_path: Path, command_factory: CommandFactory
 ) -> None:
+    payload = json.loads(
+        report_json(findings=[cycle_finding("definite"), import_finding()])
+    )
+    cycle_finding_payload = payload["views"]["structural"]["findings"][0]["finding"]
+    cycle_finding_payload["witness"][0]["evidence"].append(
+        {**evidence(), "line": 12, "source_segment": "from service import handler"}
+    )
     result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
         check_id="architecture",
         project_root=tmp_path,
         exit_code=1,
-        stdout=report_json(findings=[cycle_finding("definite"), import_finding()]),
+        stdout=json.dumps(payload),
         stderr="",
     )
 
     assert len(result.messages) == 6
-    assert "app -> service" in result.messages[-2]
-    assert "service -> app" in result.messages[-2]
-    assert "src/service.py:3:1 (import app)" in result.messages[-2]
-    assert "src/app.py:3:1 (import service)" in result.messages[-2]
+    cycle = report_section(result.messages, "Finding 1 of 2: Error [cycles]")
+    unresolved = report_section(
+        result.messages, "Finding 2 of 2: Error [unresolved-imports]"
+    )
+    assert (
+        "    1. app -> service\n      src/app.py:3:1\n        import service" in cycle
+    )
+    assert "      src/app.py:12:1\n        from service import handler" in cycle
+    assert (
+        "    2. service -> app\n      src/service.py:3:1\n        import app" in cycle
+    )
+    assert cycle.index("src/app.py:12:1") < cycle.index("2. service -> app")
+    assert "Unresolved import in app" in unresolved
+    assert "  Import locations:\n      src/app.py:3:1" in unresolved
 
 
 @pytest.mark.parametrize("exit_code", [-9, 3, 127])
@@ -433,9 +479,10 @@ def test_import_findings_can_omit_evidence(
     )
 
     assert result.status is status
-    assert result.messages[-1] == (
-        f"{severity.capitalize()} [unresolved-imports]: "
-        "Unresolved import in app: Import needs review [missing_internal_target]."
+    assert report_section(result.messages, "Finding 1 of 1:") == (
+        f"Finding 1 of 1: {severity.capitalize()} [unresolved-imports]\n"
+        "  Unresolved import in app\n"
+        "  Import needs review [missing_internal_target]"
     )
 
 
@@ -462,11 +509,12 @@ def test_mixed_component_does_not_overstate_possible_members(
     )
 
     assert result.status is CheckStatus.FAILED
-    message = result.messages[-1]
-    assert message.startswith("Error [cycles]: Definite cyclic nodes: app, service.")
-    assert "Other component nodes with possible cycle involvement: plugin." in message
-    assert "Witness: app -> service at src/app.py:3:1" in message
-    assert "service -> app at src/service.py:3:1" in message
+    message = report_section(result.messages, "Finding 1 of 1: Error [cycles]")
+    assert "Confirmed cyclic nodes:\n    - app\n    - service" in message
+    assert "Nodes with possible cycle involvement:\n    - plugin" in message
+    assert "Example cycle (witness; may cover only part of the group):" in message
+    assert "1. app -> service\n      src/app.py:3:1" in message
+    assert "2. service -> app\n      src/service.py:3:1" in message
 
 
 @pytest.mark.parametrize(
@@ -502,18 +550,25 @@ def test_only_selected_view_controls_gate(
         stderr="",
     )
     assert result.status is status
-    assert f"gate: {gate}" in result.messages[0]
+    assert result.messages[0].startswith(f"{gate}:")
+    selected = report_section(result.messages, "Selected view:")
+    assert selected.startswith(f"Selected view: {gate} (determines pass/fail)")
+    other_views = report_section(result.messages, "Other views")
+    assert "information only; do not affect this result" in other_views
+    assert f"\n  {gate}:" not in other_views
     if status is CheckStatus.PASSED:
-        assert result.messages == (
-            "Analysis is complete; gate: module-body; sources: 2; analyzed: 2.",
-            "Selected view (module-body): dependencies: 0; cyclic nodes: 0; findings: 0.",
-            "Informational view (non-typing): dependencies: 2; cyclic nodes: 2; findings: 1.",
-            "Informational view (structural): dependencies: 2; cyclic nodes: 2; findings: 1.",
-        )
+        assert result.messages[0] == "module-body: No error findings."
+        assert "0 dependencies; 0 nodes in cycles; 0 findings." in selected
+        for alternate in ("non-typing", "structural"):
+            assert (
+                f"  {alternate}: 2 dependencies; 2 nodes in cycles; 1 finding "
+                "(errors: 1)."
+            ) in other_views
+        assert not any(message.startswith("Finding") for message in result.messages)
     else:
-        assert result.messages[1].startswith(f"Selected view ({gate})")
-        assert all(
-            message.startswith("Informational view") for message in result.messages[2:4]
+        assert "2 dependencies; 2 nodes in cycles; 1 finding" in selected
+        assert (
+            "module-body: 0 dependencies; 0 nodes in cycles; 0 findings." in other_views
         )
 
 
@@ -529,17 +584,24 @@ def test_partial_report_preserves_findings_and_coverage_as_error(
         stderr="",
     )
     assert result.status is CheckStatus.ERROR
-    assert "analyzed: 1" in result.messages[0]
-    assert result.messages[0].startswith("Analysis is incomplete")
-    assert result.messages[4].startswith(
-        "src/broken.py:4:2: Error [source_syntax_error]"
+    assert "analyzed: 1/2" in report_section(result.messages, "Selected view:")
+    assert (
+        result.messages[0] == "structural: Analysis incomplete; findings are partial."
     )
-    assert any("Witness:" in message for message in result.messages) == bool(findings)
+    diagnostics = report_section(result.messages, "Analysis diagnostics")
+    assert (
+        "  Error [source_syntax_error]\n    Location: src/broken.py:4:2" in diagnostics
+    )
+    assert any(
+        "Example cycle (witness;" in message for message in result.messages
+    ) == bool(findings)
     assert len(result.messages) == 5 + len(findings)
     if findings:
-        assert result.messages[-1].startswith(
-            "Partial observation: Error [cycles]: Definite cyclic nodes"
+        observation = report_section(result.messages, "Partial observation - Finding")
+        assert observation.startswith(
+            "Partial observation - Finding 1 of 1: Error [cycles]"
         )
+        assert "Confirmed cyclic nodes:" in observation
 
 
 @pytest.mark.parametrize(
@@ -622,7 +684,7 @@ def test_boundaries_remain_visible_after_acknowledgement(
     )
     assert result.status is (CheckStatus.PASSED if acknowledged else CheckStatus.ERROR)
     messages = "\n".join(result.messages)
-    assert "Info [declared_boundary]: A generated target was declared." in messages
+    assert "Info [declared_boundary]\n    A generated target was declared." in messages
     assert "native boundary pkg.native (src/pkg/native.pyx)" in messages
     assert "src/app.py:3:1" in messages
     assert "Acknowledged generated boundary pkg.generated" in messages
@@ -659,10 +721,12 @@ def test_context_and_full_component_details_are_accepted(
         stdout=report_json(findings=[finding]),
         stderr="",
     )
-    assert "typing-only, function-local, class body" in result.messages[-1]
-    assert "conditional, exception handler, package initializer" in result.messages[-1]
-    assert "Component dependencies: app -> service" in result.messages[-1]
-    assert "app -> app" in result.messages[-1]
+    message = report_section(result.messages, "Finding 1 of 1:")
+    assert "typing-only, function-local, class body" in message
+    assert "conditional, exception handler, package initializer" in message
+    assert "All dependencies in this group:\n    1. app -> service" in message
+    assert "3. app -> app" in message
+    assert "Example cycle" not in message
 
 
 @pytest.mark.parametrize(
@@ -809,16 +873,21 @@ def test_human_findings_use_import_names_or_paths(
         stdout=json.dumps(payload),
         stderr="",
     )
-    assert "Unacknowledged native boundary pkg.native" in result.messages[5]
-    assert result.messages[6].startswith(
-        "Partial observation: Error [cycles]: Definite cyclic nodes: "
-        "application.entry, src/service.py."
+    boundaries = report_section(result.messages, "Analysis boundaries")
+    cycle = report_section(result.messages, "Partial observation - Finding 1 of 2:")
+    unresolved = report_section(
+        result.messages, "Partial observation - Finding 2 of 2:"
     )
-    assert "application.entry -> src/service.py at" in result.messages[6]
-    assert "src/service.py -> application.entry at" in result.messages[6]
-    assert result.messages[7].startswith(
-        "Partial observation: Error [unresolved-imports]: "
-        "Unresolved import in application.entry:"
+    assert "Unacknowledged native boundary pkg.native" in boundaries
+    assert (
+        "Confirmed cyclic nodes:\n    - application.entry\n    - src/service.py"
+        in cycle
+    )
+    assert "application.entry -> src/service.py" in cycle
+    assert "src/service.py -> application.entry" in cycle
+    assert unresolved.startswith(
+        "Partial observation - Finding 2 of 2: Error [unresolved-imports]\n"
+        "  Unresolved import in application.entry\n"
     )
     report = PyArchGraphReport.model_validate_json(json.dumps(payload))
     assert report.sources[0].id == "app"
@@ -900,16 +969,25 @@ def test_custom_views_and_rules_follow_registered_severity(
     )
 
     assert result.status is expected
-    assert len(result.messages) == 3
-    assert "gate: packages" in result.messages[0]
-    assert result.messages[1].startswith("Selected view (packages):")
-    assert result.messages[2].startswith(
-        f"{severity.capitalize()} [group-size]: "
-        "Consider a smaller package [large-group]."
+    assert len(result.messages) == 4
+    assert result.messages[0] == (
+        "packages: 1 error finding."
+        if severity == "error"
+        else "packages: No error findings."
     )
-    assert "Nodes: Application package" in result.messages[2]
-    assert "Sources: app" in result.messages[2]
-    assert "src/app.py:3:1" in result.messages[2]
+    selected = report_section(result.messages, "Selected view:")
+    assert selected.startswith("Selected view: packages (determines pass/fail)")
+    assert (
+        "Custom graph view; nodes and checks are defined by the producer." in selected
+    )
+    message = report_section(result.messages, "Finding 1 of 1:")
+    assert message.startswith(
+        f"Finding 1 of 1: {severity.capitalize()} [group-size]\n"
+        "  Consider a smaller package [large-group]"
+    )
+    assert "Nodes:\n    - Application package" in message
+    assert "Sources:\n    - app" in message
+    assert "src/app.py:3:1" in message
 
 
 @pytest.mark.parametrize("severity", ["warning", "info"])
@@ -930,9 +1008,182 @@ def test_nonerror_cycles_remain_visible_without_failing(
     )
 
     assert result.status is CheckStatus.PASSED
-    assert result.messages[-1].startswith(
-        f"{severity.capitalize()} [cycles]: Definite cyclic nodes: app, service."
+    assert result.messages[0] == "structural: No error findings."
+    message = report_section(result.messages, "Finding 1 of 1:")
+    assert message.startswith(
+        f"Finding 1 of 1: {severity.capitalize()} [cycles]\n  Cycle group (definite)"
     )
+    assert "Confirmed cyclic nodes:\n    - app\n    - service" in message
+
+
+def test_mixed_severities_are_labelled_separately_from_the_error_total(
+    tmp_path: Path, command_factory: CommandFactory
+) -> None:
+    payload = json.loads(report_json(findings=[]))
+    payload["views"]["structural"]["findings"] = [
+        registered_finding(
+            finding=import_finding(),
+            check_id="unresolved-imports",
+            severity=severity,
+        )
+        for severity in ("error", "warning", "info")
+    ]
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=1,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    assert result.status is CheckStatus.FAILED
+    assert result.messages[0] == "structural: 1 error finding."
+    selected = report_section(result.messages, "Selected view:")
+    assert "3 findings (errors: 1, warnings: 1, info: 1)." in selected
+    for index, severity in enumerate(("Error", "Warning", "Info"), start=1):
+        message = report_section(result.messages, f"Finding {index} of 3:")
+        assert message.startswith(
+            f"Finding {index} of 3: {severity} [unresolved-imports]"
+        )
+
+
+@pytest.mark.parametrize(
+    ("gate", "scope"),
+    [
+        (
+            "structural",
+            "All explicit imports, including typing-only and function-local.",
+        ),
+        (
+            "non-typing",
+            "Excludes typing-only imports; includes function-local imports.",
+        ),
+        (
+            "module-body",
+            "Excludes typing-only imports and imports in functions/methods.",
+        ),
+    ],
+)
+@pytest.mark.parametrize("package", [False, True])
+def test_builtin_views_explain_import_scope_and_node_grouping(
+    gate: str,
+    scope: str,
+    package: bool,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(HEALTHY_REPORT)
+    selected_gate = f"package-{gate}" if package else gate
+    payload["gate"] = selected_gate
+    payload["views"] = {selected_gate: payload["views"][gate]}
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    selected = report_section(result.messages, "Selected view:")
+    assert scope in selected
+    if package:
+        assert (
+            "Grouped by immediate package; standalone modules remain separate."
+            in selected
+        )
+        assert (
+            "Package groups combine modules; cycles between groups can exist "
+            "even when individual modules have no cycles."
+        ) in selected
+    else:
+        assert "Each node represents a source module." in selected
+        assert "Package groups" not in selected
+
+
+def test_custom_package_view_does_not_assume_builtin_grouping(
+    tmp_path: Path, command_factory: CommandFactory
+) -> None:
+    payload = json.loads(custom_report_json(severity="info"))
+    payload["gate"] = "package-review"
+    payload["views"] = {"package-review": payload["views"]["packages"]}
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    selected = report_section(result.messages, "Selected view:")
+    assert (
+        "Custom graph view; nodes and checks are defined by the producer." in selected
+    )
+    assert "Grouped by immediate package" not in selected
+    assert "Package groups" not in selected
+
+
+@pytest.mark.parametrize(
+    "limitations",
+    [[], ["Dynamic imports are excluded.", "Only declared source roots are analyzed."]],
+)
+def test_limitations_are_visible_only_when_reported(
+    limitations: list[str],
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(HEALTHY_REPORT)
+    payload["coverage"]["limitations"] = limitations
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+
+    if limitations:
+        assert report_section(result.messages, "Analysis limitations") == (
+            "Analysis limitations\n"
+            "  - Dynamic imports are excluded.\n"
+            "  - Only declared source roots are analyzed."
+        )
+    else:
+        assert all(
+            not message.startswith("Analysis limitations")
+            for message in result.messages
+        )
+
+
+def test_requested_import_and_multiline_snippet_preserve_indentation(
+    tmp_path: Path, command_factory: CommandFactory
+) -> None:
+    finding = {
+        **import_finding(),
+        "requested": "service.handlers",
+        "evidence": [
+            {
+                **evidence(),
+                "source_segment": "from service.handlers import (\n    handle,\n)",
+            }
+        ],
+    }
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="architecture",
+        project_root=tmp_path,
+        exit_code=1,
+        stdout=report_json(findings=[finding]),
+        stderr="",
+    )
+
+    message = report_section(result.messages, "Finding 1 of 1:")
+    assert "  Requested import: service.handlers\n" in message
+    assert (
+        "  Import locations:\n"
+        "      src/app.py:3:1\n"
+        "        from service.handlers import (\n"
+        "            handle,\n"
+        "        )"
+    ) in message
 
 
 def test_project_wide_custom_rules_need_no_locations_or_references(
@@ -953,8 +1204,8 @@ def test_project_wide_custom_rules_need_no_locations_or_references(
     )
 
     assert result.status is CheckStatus.PASSED
-    assert result.messages[-1] == (
-        "Info [group-size]: Consider a smaller package [large-group]."
+    assert report_section(result.messages, "Finding 1 of 1:") == (
+        "Finding 1 of 1: Info [group-size]\n  Consider a smaller package [large-group]"
     )
 
 
@@ -965,9 +1216,7 @@ def test_import_provenance_fields_may_explicitly_be_null(
     finding = {
         **import_finding(),
         "node": None,
-        "evidence": [
-            {**evidence(), "source": None, "target": None, "fact_id": None}
-        ],
+        "evidence": [{**evidence(), "source": None, "target": None, "fact_id": None}],
     }
     result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
         check_id="architecture",
@@ -978,8 +1227,9 @@ def test_import_provenance_fields_may_explicitly_be_null(
     )
 
     assert result.status is CheckStatus.FAILED
-    assert "Unresolved import in app: Import needs review" in result.messages[-1]
-    assert "src/app.py:3:1" in result.messages[-1]
+    message = report_section(result.messages, "Finding 1 of 1:")
+    assert "Unresolved import in app\n  Import needs review" in message
+    assert "src/app.py:3:1" in message
 
 
 def test_aggregated_cycles_use_node_labels_and_original_evidence(
@@ -1008,15 +1258,13 @@ def test_aggregated_cycles_use_node_labels_and_original_evidence(
     )
 
     assert result.status is CheckStatus.FAILED
+    message = report_section(result.messages, "Finding 1 of 1:")
     assert (
-        "Definite cyclic nodes: Application group, Service group."
-        in result.messages[-1]
+        "Confirmed cyclic nodes:\n    - Application group\n    - Service group"
+        in message
     )
-    assert "Application group -> Service group at src/app.py:3:1" in result.messages[-1]
-    assert (
-        "Service group -> Application group at src/service.py:3:1"
-        in result.messages[-1]
-    )
+    assert "Application group -> Service group\n      src/app.py:3:1" in message
+    assert "Service group -> Application group\n      src/service.py:3:1" in message
 
 
 @pytest.mark.parametrize(
@@ -1148,7 +1396,9 @@ def test_view_dependencies_preserve_projected_nodes_and_source_evidence(
     )
     assert result.status is CheckStatus.PASSED
     assert result.check_id == "pyarchgraph-packages"
-    assert result.messages[1].startswith("Selected view (package-structural):")
+    assert report_section(result.messages, "Selected view:").startswith(
+        "Selected view: package-structural (determines pass/fail)"
+    )
 
 
 @pytest.mark.parametrize("gate", ["structural", "module-body"])

@@ -1410,15 +1410,26 @@ def test_cli_reports_pyarchgraph_findings(
         assert output.results[0].check_id == "architecture"
         assert output.results[0].status is status
         gate = json.loads(content)["gate"]
-        assert output.results[0].messages[0] == (
-            f"Analysis is complete; gate: {gate}; sources: 2; analyzed: 2."
-        )
+        assert output.results[0].messages[0].startswith(f"{gate}: ")
+        assert "source files analyzed: 2/2." in output.results[0].messages[1]
         if gate == "packages":
-            assert "Warning [group-size]" in output.results[0].messages[-1]
-            assert "Application package" in output.results[0].messages[-1]
+            finding = next(
+                message
+                for message in output.results[0].messages
+                if message.startswith("Finding ")
+            )
+            assert "Warning [group-size]" in finding
+            assert "Application package" in finding
     else:
         assert "architecture" in result.stdout
         assert ("PASS" if status is CheckStatus.PASSED else "FAIL") in result.stdout
+        assert "Selected view:" in result.stdout
+        assert "determines pass/fail" in result.stdout
+        assert result.stdout.index("Selected view:") > result.stdout.index("└")
+        if status is CheckStatus.FAILED:
+            assert "Finding 1 of" in result.stdout
+            assert result.stdout.index("Finding 1 of") < result.stdout.index("Other views")
+
 
 
 @pytest.mark.parametrize("output_format", ["text", "json"])

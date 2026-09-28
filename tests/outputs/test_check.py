@@ -5,8 +5,10 @@ import json
 from collections.abc import Callable
 
 import pytest
-from rich.console import Console
+from rich.console import Console, Group
+from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 from checksmith.dtos import CheckResult, CheckStatus, ExitCode
 from checksmith.outputs.base import CliOutput
@@ -206,6 +208,127 @@ def test_rendering_reports_skipped_checks_and_their_explanation(
     assert "SKIP" in rendered
     assert "Check prerequisites are not met." in rendered
     assert "PASS" not in rendered
+
+
+@pytest.mark.parametrize("width", [80, 100, 160])
+def test_multiline_details_render_below_the_summary_at_terminal_widths(
+    width: int,
+) -> None:
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="ruff",
+                status=CheckStatus.PASSED,
+                messages=("All checks passed.",),
+            ),
+            CheckResult(
+                check_id="pyarchgraph-packages",
+                status=CheckStatus.FAILED,
+                messages=(
+                    "Found two cycle groups.",
+                    (
+                        "Cycle group 1\n"
+                        "Detail which stays readable outside the narrow summary cell"
+                    ),
+                    "Cycle group 2\napp -> service\nservice -> app",
+                ),
+            ),
+        )
+    )
+    buffer = io.StringIO()
+
+    Console(file=buffer, width=width, no_color=True).print(output)
+    rendered = buffer.getvalue()
+
+    assert "All checks passed." in rendered
+    assert "Found two cycle groups." in rendered
+    assert "pyarchgraph-packages | FAIL" in rendered
+    assert "Detail which stays readable outside the narrow summary cell" in rendered
+    assert "app -> service" in rendered
+    assert "service -> app" in rendered
+    assert rendered.index("Found two cycle groups.") < rendered.index("Cycle group 1")
+    assert rendered.index("Cycle group 1") < rendered.index("Cycle group 2")
+
+
+def test_detail_panels_preserve_first_message_remainders_and_block_spacing() -> None:
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="architecture",
+                status=CheckStatus.ERROR,
+                messages=(
+                    "Analysis incomplete.\nFirst detail\nSecond detail",
+                    "Additional context",
+                    "Final block\nLast detail",
+                ),
+            ),
+        )
+    )
+
+    rendered = output.__rich__()
+
+    assert isinstance(rendered, Group)
+    table, panel = rendered.renderables
+    assert isinstance(table, Table)
+    assert isinstance(panel, Panel)
+    assert isinstance(panel.renderable, Text)
+    assert panel.renderable.plain == (
+        "First detail\nSecond detail\n\n"
+        "Additional context\n\nFinal block\nLast detail"
+    )
+    assert isinstance(panel.title, Text)
+    assert panel.title.plain == "architecture | ERROR"
+
+
+def test_detail_panels_preserve_literal_check_names_and_diagnostics(
+    render: Callable[[CliOutput], str],
+) -> None:
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="[red]architecture[/red]",
+                status=CheckStatus.FAILED,
+                messages=(
+                    "[bold]Review imports[/bold]",
+                    "[red]Cycle group[/red]\nsrc/[name].py:1:1",
+                    "[link=https://example.com]Literal context[/link]",
+                ),
+            ),
+        )
+    )
+
+    rendered = render(output)
+
+    assert "[red]architecture[/red] | FAIL" in rendered
+    assert all(
+        line in rendered for message in output.results[0].messages
+        for line in message.splitlines()
+    )
+
+
+def test_multiple_detail_panels_follow_check_order() -> None:
+    output = CheckOutput(
+        results=tuple(
+            CheckResult(
+                check_id=status.value,
+                status=status,
+                messages=("Summary", "First detail\nSecond detail"),
+            )
+            for status in CheckStatus
+        )
+    )
+
+    rendered = output.__rich__()
+
+    assert isinstance(rendered, Group)
+    assert isinstance(rendered.renderables[0], Table)
+    panels = rendered.renderables[1:]
+    assert all(isinstance(panel, Panel) for panel in panels)
+    assert [
+        panel.title.plain
+        for panel in panels
+        if isinstance(panel, Panel) and isinstance(panel.title, Text)
+    ] == ["passed | PASS", "failed | FAIL", "error | ERROR", "skipped | SKIP"]
 
 
 def test_json_preserves_order_across_all_result_statuses() -> None:

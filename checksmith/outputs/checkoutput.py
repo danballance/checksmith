@@ -1,6 +1,7 @@
 """Output model for the ``check`` operation."""
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
@@ -26,17 +27,38 @@ class CheckOutput(CliOutput):
         table.add_column("Check")
         table.add_column("Status")
         table.add_column("Messages")
+        details: list[Panel] = []
         for result in self.results:
             match result.status:
                 case CheckStatus.ERROR:
-                    status = "[red]ERROR[/red]"
+                    status = Text("ERROR", style="red")
                 case CheckStatus.FAILED:
-                    status = "[red]FAIL[/red]"
+                    status = Text("FAIL", style="red")
                 case CheckStatus.PASSED:
-                    status = "[green]PASS[/green]"
+                    status = Text("PASS", style="green")
                 case CheckStatus.SKIPPED:
-                    status = "[yellow]SKIP[/yellow]"
-            table.add_row(
-                Text(result.check_id), status, Text("\n".join(result.messages))
-            )
-        return table
+                    status = Text("SKIP", style="yellow")
+            if any("\n" in message for message in result.messages):
+                summary, separator, remainder = result.messages[0].partition("\n")
+                detail_messages = list(result.messages[1:])
+                if separator:
+                    detail_messages.insert(0, remainder)
+                content = Text()
+                for index, message in enumerate(detail_messages):
+                    if index:
+                        content.append("\n\n")
+                    heading, newline, body = message.partition("\n")
+                    content.append(heading, style="bold")
+                    content.append(newline + body)
+                details.append(
+                    Panel(
+                        content,
+                        title=Text.assemble(Text(result.check_id), " | ", status),
+                        title_align="left",
+                    )
+                )
+                messages = summary
+            else:
+                messages = "\n".join(result.messages)
+            table.add_row(Text(result.check_id), status, Text(messages))
+        return Group(table, *details) if details else table

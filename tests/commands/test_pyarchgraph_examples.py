@@ -268,9 +268,7 @@ def test_real_cli_examples_produce_expected_checksmith_results(
         assert any(".py:" in message for message in output.results[0].messages)
     if expected is CheckStatus.ERROR:
         assert completed.stdout
-        assert any(
-            "Analysis is incomplete" in msg for msg in output.results[0].messages
-        )
+        assert any("Analysis incomplete" in msg for msg in output.results[0].messages)
 
 
 def test_real_builtin_package_gate_fails_an_acyclic_module_graph(
@@ -350,7 +348,7 @@ def test_real_builtin_package_gate_fails_an_acyclic_module_graph(
     messages = tuple(
         message
         for message in package_result.messages
-        if message.startswith("Error [cycles]: ")
+        if message.startswith("Finding ") and ": Error [cycles]\n" in message
     )
     assert len(messages) == 1
     assert "one -> two" in messages[0]
@@ -404,10 +402,11 @@ def test_real_builtin_package_gate_reports_incomplete_analysis(
     assert report.status == "incomplete"
     assert report.views[report.gate].findings
     assert result.status is CheckStatus.ERROR
-    assert any("Analysis is incomplete" in message for message in result.messages)
+    assert any("Analysis incomplete" in message for message in result.messages)
     assert any("one/broken.py" in message for message in result.messages)
     assert any(
-        message.startswith("Partial observation: Error [cycles]: ")
+        message.startswith("Partial observation - Finding ")
+        and ": Error [cycles]\n" in message
         for message in result.messages
     )
 
@@ -467,7 +466,8 @@ def test_real_custom_rule_envelopes_preserve_severity_and_projected_references(
     rendered = tuple(
         message
         for message in result.messages
-        if message.startswith(f"{severity.capitalize()} [project-review]: ")
+        if message.startswith("Finding ")
+        and f": {severity.capitalize()} [project-review]\n" in message
     )
     assert len(rendered) == 2
     assert all("package-review" in message for message in rendered)
@@ -502,7 +502,9 @@ def test_real_builtin_cycle_check_uses_custom_view_node_labels(
     assert set(finding.members) == {"package:one", "package:two"}
     assert result.status is CheckStatus.FAILED
     messages = tuple(
-        message for message in result.messages if message.startswith("Error [cycles]: ")
+        message
+        for message in result.messages
+        if message.startswith("Finding ") and ": Error [cycles]\n" in message
     )
     assert len(messages) == 1
     assert "one -> two" in messages[0]
