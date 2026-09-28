@@ -1173,6 +1173,78 @@ def pyarchgraph_config_file(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.fixture
+def pyarchgraph_selection_config_file(pyarchgraph_config_file: Path) -> Path:
+    pyarchgraph_config_file.write_text(
+        pyarchgraph_config_file.read_text(encoding="utf-8")
+        .replace("id: architecture", "id: pyarchgraph-modules")
+        .replace("args: [src]", "args: [., --gate, structural]")
+        + "  - id: pyarchgraph-packages\n"
+        "    package_type: uvx\n"
+        "    package: pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main\n"
+        "    command: pyarchgraph\n"
+        "    args: [., --gate, package-structural]\n",
+        encoding="utf-8",
+    )
+    return pyarchgraph_config_file
+
+
+@pytest.mark.parametrize(
+    "check_id", [None, "pyarchgraph-modules", "pyarchgraph-packages"]
+)
+def test_cli_runs_module_and_package_architecture_checks_by_id(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    pyarchgraph_selection_config_file: Path,
+    processes: FakeProcesses,
+    check_id: str | None,
+) -> None:
+    processes.stdout = HEALTHY_REPORT
+    arguments = [
+        "check",
+        "--config",
+        str(pyarchgraph_selection_config_file),
+        "--format",
+        "json",
+    ]
+    if check_id is not None:
+        arguments.extend(["--check", check_id])
+
+    result = cli_runner.invoke(app, arguments)
+
+    assert result.exit_code == ExitCode.SUCCESS, result.stdout
+    assert result.stderr == ""
+    expected_checks = {
+        "pyarchgraph-modules": "structural",
+        "pyarchgraph-packages": "package-structural",
+    }
+    if check_id is not None:
+        expected_checks = {check_id: expected_checks[check_id]}
+    output = CheckOutput.model_validate_json(result.stdout)
+    assert [entry.check_id for entry in output.results] == list(expected_checks)
+    assert all(entry.status is CheckStatus.PASSED for entry in output.results)
+    assert [process.check_id for process in processes.started] == list(expected_checks)
+    assert [process.argv for process in processes.started] == [
+        (
+            "uvx",
+            "--isolated",
+            "--refresh-package",
+            "pyarchgraph",
+            "--from",
+            "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
+            "pyarchgraph",
+            ".",
+            "--gate",
+            gate,
+        )
+        for gate in expected_checks.values()
+    ]
+    assert all(
+        process.cwd == pyarchgraph_selection_config_file.parent
+        for process in processes.started
+    )
+
+
 @pytest.mark.parametrize("output_format", ["text", "json"])
 @pytest.mark.parametrize(
     ("content", "tool_exit_code", "status", "exit_code"),
@@ -1249,10 +1321,10 @@ def test_cli_reports_pyarchgraph_findings(
         ("", 2, "Cannot analyze src", "pyarchgraph exited 2"),
         (HEALTHY_REPORT, 1, "", "exit code disagrees"),
         (
-            HEALTHY_REPORT.replace('"0.7"', '"0.6"'),
+            HEALTHY_REPORT.replace('"0.8"', '"0.7"'),
             0,
             "",
-            "schema 0.7",
+            "schema 0.8",
         ),
         (
             partial_report_json(findings=[cycle_finding("definite")]),

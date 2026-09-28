@@ -133,6 +133,7 @@ class GraphView(ReportModel):
     nodes: tuple[ViewNode, ...]
     enabled_check_ids: tuple[Text, ...]
     dependency_count: Count
+    dependencies: tuple[Dependency, ...] | None
     cyclic_node_count: Count
     cyclic_dependency_count: Count
     findings: tuple[RegisteredFinding, ...]
@@ -145,6 +146,15 @@ class GraphView(ReportModel):
         if len(set(members)) != len(members):
             raise ValueError("view node memberships must be disjoint")
         _require_known_references(set(members), sources, "view memberships")
+        if self.dependencies is not None:
+            for dependency in self.dependencies:
+                _require_known_references(
+                    {dependency.source, dependency.target},
+                    nodes,
+                    "dependency node references",
+                )
+                for evidence in dependency.evidence:
+                    evidence.validate_sources(sources)
         checks = set(self.enabled_check_ids)
         if len(checks) != len(self.enabled_check_ids):
             raise ValueError("enabled check IDs must be unique")
@@ -199,7 +209,7 @@ class Coverage(ReportModel):
 
 
 class PyArchGraphReport(ReportModel):
-    schema_version: Literal["0.7"]
+    schema_version: Literal["0.8"]
     status: Literal["complete", "incomplete"]
     gate: Text
     sources: tuple[SourceModule, ...]
@@ -260,7 +270,7 @@ class PyArchGraphCommand(Command):
                 check_id=check_id,
                 command=self.name,
                 summary="Invalid PyArchGraph report on stdout",
-                problem=f"Expected a schema 0.7 JSON report: {error}",
+                problem=f"Expected a schema 0.8 JSON report: {error}",
             ) from error
         selected = report.views[report.gate]
         incomplete = report.status == "incomplete"

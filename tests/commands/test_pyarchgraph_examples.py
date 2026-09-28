@@ -164,15 +164,40 @@ def run_custom_producer(
     )
 
 
-def read_custom_producer(
-    *, completed: subprocess.CompletedProcess[str], project: Path
+def run_producer_cli(
+    *, arguments: tuple[str, ...], project_root: Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        (
+            "uv",
+            "run",
+            "--project",
+            str(PRODUCER),
+            "--no-sync",
+            "python",
+            "-m",
+            "pyarchgraph",
+            *arguments,
+        ),
+        cwd=project_root,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+        timeout=30,
+    )
+
+
+def read_producer_response(
+    *, completed: subprocess.CompletedProcess[str], project: Path, check_id: str
 ) -> tuple[PyArchGraphReport, CheckResult]:
     report = PyArchGraphReport.model_validate_json(completed.stdout)
     result = (
         make_command_factory(executor=FakeProcesses())
         .for_name(name=CommandName.PYARCHGRAPH)
         .process_response(
-            check_id="custom-architecture",
+            check_id=check_id,
             project_root=project,
             exit_code=completed.returncode,
             stdout=completed.stdout,
@@ -207,29 +232,10 @@ def test_real_cli_examples_produce_expected_checksmith_results(
         arguments.extend(("--exclude", pattern))
     if example.config is not None:
         arguments.extend(("--config", str(project / example.config)))
-    completed = subprocess.run(
-        (
-            "uv",
-            "run",
-            "--project",
-            str(PRODUCER),
-            "--no-sync",
-            "python",
-            "-m",
-            "pyarchgraph",
-            *arguments,
-        ),
-        cwd=PRODUCER,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=False,
-        timeout=30,
-    )
+    completed = run_producer_cli(arguments=tuple(arguments), project_root=PRODUCER)
     assert completed.returncode == example.expected.exit_code, completed.stderr
     report = PyArchGraphReport.model_validate_json(completed.stdout)
-    assert report.schema_version == "0.7"
+    assert report.schema_version == "0.8"
     assert report.status == example.expected.status
     assert report.gate == example.gate
 
@@ -267,6 +273,145 @@ def test_real_cli_examples_produce_expected_checksmith_results(
         )
 
 
+def test_real_builtin_package_gate_fails_an_acyclic_module_graph(
+    projected_packages: Path,
+) -> None:
+    module_run = run_producer_cli(
+        arguments=(".", "--gate", "structural", "--details", "component-edges"),
+        project_root=projected_packages,
+    )
+    package_run = run_producer_cli(
+        arguments=(".", "--gate", "package-structural", "--details", "component-edges"),
+        project_root=projected_packages,
+    )
+    assert module_run.returncode == 0, module_run.stderr
+    assert package_run.returncode == 1, package_run.stderr
+    module_report, module_result = read_producer_response(
+        completed=module_run,
+        project=projected_packages,
+        check_id="pyarchgraph-modules",
+    )
+    package_report, package_result = read_producer_response(
+        completed=package_run,
+        project=projected_packages,
+        check_id="pyarchgraph-packages",
+    )
+
+    assert module_report.gate == "structural"
+    assert package_report.gate == "package-structural"
+    assert module_report.views == package_report.views
+    assert module_result.check_id == "pyarchgraph-modules"
+    assert module_result.status is CheckStatus.PASSED
+    assert package_result.check_id == "pyarchgraph-packages"
+    assert package_result.status is CheckStatus.FAILED
+    module_view = module_report.views["structural"]
+    assert module_view.findings == ()
+    assert module_view.dependency_count == 3
+    assert module_view.dependencies is None
+    package_view = package_report.views["package-structural"]
+    assert package_view.dependency_count == package_view.cyclic_node_count == 2
+    assert {node.id: node.label for node in package_view.nodes} == {
+        "package:one": "one",
+        "package:two": "two",
+    }
+    assert package_view.dependencies is not None
+    assert {(edge.source, edge.target) for edge in package_view.dependencies} == {
+        ("package:one", "package:two"),
+        ("package:two", "package:one"),
+    }
+    expected_evidence = {
+        ("package:one", "package:two"): (
+            "source:one/a.py",
+            "source:two/leaf.py",
+            "one/a.py",
+            "import two.leaf",
+        ),
+        ("package:two", "package:one"): (
+            "source:two/b.py",
+            "source:one/leaf.py",
+            "two/b.py",
+            "import one.leaf",
+        ),
+    }
+    for edge in package_view.dependencies:
+        (evidence,) = edge.evidence
+        assert (
+            evidence.source,
+            evidence.target,
+            evidence.path,
+            evidence.source_segment,
+        ) == expected_evidence[edge.source, edge.target]
+        assert evidence.line == evidence.column == 1
+        assert evidence.fact_id is not None
+    (registered,) = package_view.findings
+    assert registered.check_id == "cycles"
+    assert registered.finding.kind == "cycle"
+    assert set(registered.finding.members) == {"package:one", "package:two"}
+    messages = tuple(
+        message
+        for message in package_result.messages
+        if message.startswith("Error [cycles]: ")
+    )
+    assert len(messages) == 1
+    assert "one -> two" in messages[0]
+    assert "two -> one" in messages[0]
+    assert "one/a.py:1:1" in messages[0]
+    assert "two/b.py:1:1" in messages[0]
+
+
+def test_real_builtin_package_gate_passes_with_acyclic_dependencies(
+    projected_packages: Path,
+) -> None:
+    (projected_packages / "two" / "b.py").write_text("", encoding="utf-8")
+    completed = run_producer_cli(
+        arguments=(".", "--gate", "package-structural", "--details", "component-edges"),
+        project_root=projected_packages,
+    )
+    assert completed.returncode == 0, completed.stderr
+    report, result = read_producer_response(
+        completed=completed,
+        project=projected_packages,
+        check_id="pyarchgraph-packages",
+    )
+
+    assert report.status == "complete"
+    selected = report.views[report.gate]
+    assert selected.findings == ()
+    assert selected.dependency_count == 1
+    assert selected.dependencies is not None
+    (dependency,) = selected.dependencies
+    assert (dependency.source, dependency.target) == ("package:one", "package:two")
+    assert result.status is CheckStatus.PASSED
+
+
+def test_real_builtin_package_gate_reports_incomplete_analysis(
+    projected_packages: Path,
+) -> None:
+    (projected_packages / "one" / "broken.py").write_text(
+        "def broken(:\n", encoding="utf-8"
+    )
+    completed = run_producer_cli(
+        arguments=(".", "--gate", "package-structural", "--details", "component-edges"),
+        project_root=projected_packages,
+    )
+    assert completed.returncode == 2, completed.stderr
+    report, result = read_producer_response(
+        completed=completed,
+        project=projected_packages,
+        check_id="pyarchgraph-packages",
+    )
+
+    assert report.status == "incomplete"
+    assert report.views[report.gate].findings
+    assert result.status is CheckStatus.ERROR
+    assert any("Analysis is incomplete" in message for message in result.messages)
+    assert any("one/broken.py" in message for message in result.messages)
+    assert any(
+        message.startswith("Partial observation: Error [cycles]: ")
+        for message in result.messages
+    )
+
+
 @pytest.mark.parametrize(
     ("severity", "exit_code", "status"),
     [
@@ -289,10 +434,12 @@ def test_real_custom_rule_envelopes_preserve_severity_and_projected_references(
     )
 
     assert completed.returncode == exit_code, completed.stderr
-    report, result = read_custom_producer(
-        completed=completed, project=projected_packages
+    report, result = read_producer_response(
+        completed=completed,
+        project=projected_packages,
+        check_id="custom-architecture",
     )
-    assert report.schema_version == "0.7"
+    assert report.schema_version == "0.8"
     assert report.status == "complete"
     assert report.gate == "packages"
     selected = report.views["packages"]
@@ -339,8 +486,10 @@ def test_real_builtin_cycle_check_uses_custom_view_node_labels(
     )
 
     assert completed.returncode == 1, completed.stderr
-    report, result = read_custom_producer(
-        completed=completed, project=projected_packages
+    report, result = read_producer_response(
+        completed=completed,
+        project=projected_packages,
+        check_id="custom-architecture",
     )
     selected = report.views["packages"]
     assert selected.enabled_check_ids == ("cycles",)
@@ -373,8 +522,10 @@ def test_real_unselected_custom_errors_do_not_fail_a_clean_selected_gate(
     )
 
     assert completed.returncode == 0, completed.stderr
-    report, result = read_custom_producer(
-        completed=completed, project=projected_packages
+    report, result = read_producer_response(
+        completed=completed,
+        project=projected_packages,
+        check_id="custom-architecture",
     )
     assert report.gate == "structural"
     assert report.views["structural"].findings == ()

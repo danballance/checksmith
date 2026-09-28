@@ -100,6 +100,7 @@ def report_json(*, findings: list[JsonValue]) -> str:
         ],
         "enabled_check_ids": ["cycles", "unresolved-imports"],
         "dependency_count": 2,
+        "dependencies": None,
         "cyclic_node_count": 2 if findings else 0,
         "cyclic_dependency_count": 2 if findings else 0,
         "findings": [
@@ -118,7 +119,7 @@ def report_json(*, findings: list[JsonValue]) -> str:
     }
     return json.dumps(
         {
-            "schema_version": "0.7",
+            "schema_version": "0.8",
             "status": "complete",
             "gate": "structural",
             "sources": [
@@ -170,6 +171,7 @@ def custom_report_json(*, severity: Literal["error", "warning", "info"]) -> str:
             ],
             "enabled_check_ids": ["group-size"],
             "dependency_count": 0,
+            "dependencies": None,
             "cyclic_dependency_count": 0,
             "cyclic_node_count": 0,
             "findings": [
@@ -343,6 +345,7 @@ def test_stdout_must_be_a_complete_json_report(
     ("field", "value"),
     [
         ("schema_version", "0.6"),
+        ("schema_version", "0.7"),
         ("status", "partial"),
         ("gate", "non_typing"),
         ("sources", {}),
@@ -356,7 +359,7 @@ def test_report_schema_is_strict(
 ) -> None:
     payload = json.loads(HEALTHY_REPORT)
     payload[field] = value
-    with pytest.raises(CheckOutputError, match="schema 0.7"):
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -396,7 +399,7 @@ def test_report_schema_is_strict(
 def test_malformed_findings_are_errors(
     finding: JsonValue, tmp_path: Path, command_factory: CommandFactory
 ) -> None:
-    with pytest.raises(CheckOutputError, match="schema 0.7"):
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -486,6 +489,7 @@ def test_only_selected_view_controls_gate(
         "nodes": payload["views"]["module-body"]["nodes"],
         "enabled_check_ids": ["cycles", "unresolved-imports"],
         "dependency_count": 0,
+        "dependencies": None,
         "cyclic_node_count": 0,
         "cyclic_dependency_count": 0,
         "findings": [],
@@ -684,7 +688,7 @@ def test_nested_schema_and_unselected_views_are_strict(
     payload = json.loads(HEALTHY_REPORT)
     target = payload["coverage"] if section == "coverage" else payload["views"][section]
     target[field] = value
-    with pytest.raises(CheckOutputError, match="schema 0.7"):
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -838,7 +842,7 @@ def test_source_identity_protocol_errors_are_rejected(
     else:
         payload["sources"] = []
         payload["coverage"]["analyzed_source_count"] = 0
-    with pytest.raises(CheckOutputError, match="schema 0.7"):
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -848,12 +852,12 @@ def test_source_identity_protocol_errors_are_rejected(
         )
 
 
-def test_schema_07_exposes_nodes_checks_and_evidence_provenance() -> None:
+def test_schema_08_exposes_nodes_checks_and_evidence_provenance() -> None:
     report = PyArchGraphReport.model_validate_json(
         report_json(findings=[cycle_finding("definite"), import_finding()])
     )
 
-    assert report.schema_version == "0.7"
+    assert report.schema_version == "0.8"
     assert set(report.views) == {"structural", "non-typing", "module-body"}
     view = report.views["structural"]
     assert view.nodes[0].id == "app"
@@ -1033,7 +1037,7 @@ def test_aggregated_cycles_use_node_labels_and_original_evidence(
         "unknown_evidence_target",
     ],
 )
-def test_schema_07_rejects_invalid_view_protocol_references(
+def test_schema_08_rejects_invalid_view_protocol_references(
     problem: str,
     tmp_path: Path,
     command_factory: CommandFactory,
@@ -1073,7 +1077,7 @@ def test_schema_07_rejects_invalid_view_protocol_references(
             "missing-source"
         )
 
-    with pytest.raises(CheckOutputError, match="schema 0.7"):
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
@@ -1091,11 +1095,120 @@ def test_custom_rules_reject_unknown_references(
 ) -> None:
     payload = json.loads(custom_report_json(severity="error"))
     payload["views"]["packages"]["findings"][0]["finding"][field] = ["missing"]
-    with pytest.raises(CheckOutputError, match="schema 0.7"):
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
         command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
             check_id="architecture",
             project_root=tmp_path,
             exit_code=1,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        None,
+        [],
+        [
+            {
+                **dependency(),
+                "source": "package:entry",
+                "target": "package:logic",
+            }
+        ],
+    ],
+)
+def test_view_dependencies_preserve_projected_nodes_and_source_evidence(
+    dependencies: list[JsonValue] | None,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(HEALTHY_REPORT)
+    payload["gate"] = "package-structural"
+    view = payload["views"].pop("structural")
+    view["nodes"] = [
+        {"id": "package:entry", "label": "Entry package", "members": ["app"]},
+        {"id": "package:logic", "label": "Logic package", "members": ["service"]},
+    ]
+    view["dependencies"] = dependencies
+    view["dependency_count"] = len(dependencies) if dependencies is not None else 0
+    payload["views"]["package-structural"] = view
+    stdout = json.dumps(payload)
+
+    report = PyArchGraphReport.model_validate_json(stdout)
+    document = json.loads(report.model_dump_json())
+    assert document["views"]["package-structural"]["dependencies"] == dependencies
+    result = command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+        check_id="pyarchgraph-packages",
+        project_root=tmp_path,
+        exit_code=0,
+        stdout=stdout,
+        stderr="",
+    )
+    assert result.status is CheckStatus.PASSED
+    assert result.check_id == "pyarchgraph-packages"
+    assert result.messages[1].startswith("Selected view (package-structural):")
+
+
+@pytest.mark.parametrize("gate", ["structural", "module-body"])
+def test_view_dependencies_are_required_even_for_informational_views(
+    gate: str,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(HEALTHY_REPORT)
+    del payload["views"][gate]["dependencies"]
+
+    with pytest.raises(CheckOutputError, match=rf"views\.{gate}\.dependencies"):
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+            check_id="pyarchgraph-modules",
+            project_root=tmp_path,
+            exit_code=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+
+@pytest.mark.parametrize("gate", ["structural", "module-body"])
+@pytest.mark.parametrize(
+    "dependencies",
+    [
+        {},
+        [None],
+        [{"source": "app", "evidence": [evidence()]}],
+        [{**dependency(), "unexpected": True}],
+        [{**dependency(), "evidence": []}],
+        [{**dependency(), "source": "missing-node"}],
+        [{**dependency(), "target": "missing-node"}],
+        [
+            {
+                **dependency(),
+                "evidence": [{**evidence(), "source": "missing-source"}],
+            }
+        ],
+        [
+            {
+                **dependency(),
+                "evidence": [{**evidence(), "target": "missing-source"}],
+            }
+        ],
+    ],
+)
+def test_malformed_view_dependencies_are_rejected_in_every_view(
+    gate: str,
+    dependencies: JsonValue,
+    tmp_path: Path,
+    command_factory: CommandFactory,
+) -> None:
+    payload = json.loads(HEALTHY_REPORT)
+    payload["views"][gate]["dependencies"] = dependencies
+
+    with pytest.raises(CheckOutputError, match="schema 0.8"):
+        command_factory.for_name(name=CommandName.PYARCHGRAPH).process_response(
+            check_id="pyarchgraph-modules",
+            project_root=tmp_path,
+            exit_code=0,
             stdout=json.dumps(payload),
             stderr="",
         )

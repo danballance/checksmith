@@ -32,20 +32,28 @@ def test_the_starter_config_loads_through_the_real_loader(
     )
 
     assert config.checks
-    architecture = next(
+    architecture = tuple(
         check for check in config.checks if check.command is CommandName.PYARCHGRAPH
     )
-    assert architecture.argv == (
-        "uvx",
-        "--isolated",
-        "--refresh-package",
-        "pyarchgraph",
-        "--from",
-        "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
-        "pyarchgraph",
-        ".",
-        "--gate",
-        "structural",
+    assert tuple(check.id for check in architecture) == (
+        "pyarchgraph-modules",
+        "pyarchgraph-packages",
+    )
+    assert all(check.package_type is PackageType.UVX for check in architecture)
+    assert tuple(check.argv for check in architecture) == tuple(
+        (
+            "uvx",
+            "--isolated",
+            "--refresh-package",
+            "pyarchgraph",
+            "--from",
+            "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main",
+            "pyarchgraph",
+            ".",
+            "--gate",
+            gate,
+        )
+        for gate in ("structural", "package-structural")
     )
 
 

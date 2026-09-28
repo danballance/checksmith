@@ -89,7 +89,7 @@ checks:
       - --cov-report=term-missing
       - --cov-fail-under=90
 
-  - id: pyarchgraph
+  - id: pyarchgraph-modules
     package_type: uvx
     package: "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main"
     command: pyarchgraph
@@ -98,3 +98,13 @@ checks:
       - .
       - --gate
       - structural
+
+  - id: pyarchgraph-packages
+    package_type: uvx
+    package: "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main"
+    command: pyarchgraph
+
+    args:
+      - .
+      - --gate
+      - package-structural

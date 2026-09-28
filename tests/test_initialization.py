@@ -9,7 +9,7 @@ from pydantic import BaseModel, ValidationError
 from astcheck.domain.configuration import AnalysisPolicy, PluginConfiguration
 from checksmith.config import Config, ConfigPath
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
-from checksmith.dtos import CommandName
+from checksmith.dtos import CommandName, PackageType
 from checksmith.errors import ChecksmithError
 from checksmith.initialization import (
     Initializer,
@@ -546,6 +546,40 @@ def test_generated_config_preserves_explicit_complexipy_defaults(
     assert config.project_root == project_root
     assert {path.name for path in destination.iterdir()} == set(FILE_NAMES)
     assert not tuple(project_root.iterdir())
+
+
+def test_generated_config_includes_module_and_package_architecture_checks(
+    initializer: Initializer,
+    destination: Path,
+    project_root: Path,
+) -> None:
+    initializer.initialize(
+        astcheck_policy=make_astcheck_policy(),
+        destination=destination,
+        project_root=project_root,
+    )
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
+        config_file=destination / "checksmith.yaml",
+        working_directory=destination,
+    )
+    architecture = tuple(
+        check for check in config.checks if check.command is CommandName.PYARCHGRAPH
+    )
+
+    assert tuple(check.id for check in architecture) == (
+        "pyarchgraph-modules",
+        "pyarchgraph-packages",
+    )
+    assert tuple(check.arguments for check in architecture) == (
+        (".", "--gate", "structural"),
+        (".", "--gate", "package-structural"),
+    )
+    assert all(check.package_type is PackageType.UVX for check in architecture)
+    assert all(
+        check.package
+        == "pyarchgraph @ git+https://github.com/danballance/pyarchgraph@main"
+        for check in architecture
+    )
 
 
 def test_relative_paths_resolve_against_the_destination(
