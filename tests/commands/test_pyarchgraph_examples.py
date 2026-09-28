@@ -255,7 +255,7 @@ def test_real_cli_examples_produce_expected_checksmith_results(
         checks=(check,),
         commands=command_factory.registry(),
         project_root=PRODUCER,
-    ).check()
+    ).check(output=None)
 
     expected = {
         "pass": CheckStatus.PASSED,

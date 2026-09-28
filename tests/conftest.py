@@ -134,6 +134,14 @@ class FakeProcesses:
         self.exit_code = 0
         self.stdout = ""
         self.stderr = ""
+        self.pytest_report = PytestSummary(
+            outcomes={},
+            duration_seconds=0.0,
+            warnings=0,
+            deselected=0,
+            failures=(),
+            coverage=None,
+        )
         """What every process reports. A test that wants another sets them."""
 
         self.refusal: OSError | None = None
@@ -158,6 +166,12 @@ class FakeProcesses:
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
             )
         )
+        for index, argument in enumerate(argv[:-3]):
+            if argument == "python" and argv[index + 1] == "-c":
+                Path(argv[index + 3]).write_text(
+                    self.pytest_report.model_dump_json(), encoding="utf-8"
+                )
+                break
         return subprocess.CompletedProcess(
             args=list(argv),
             returncode=self.exit_code,

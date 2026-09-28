@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from checksmith.commands.pytest import PackagedLauncherSource, PytestCommand
+from checksmith.commands.pytest import (
+    PackagedLauncherSource,
+    PytestCommand,
+    PytestCoverage,
+    PytestFailure,
+    PytestSummary,
+)
 from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check, ConfigPath
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
@@ -45,50 +51,70 @@ def test_the_adapter_does_not_import_the_host_pytest(
     assert "checksmith.commands._pytest_launcher" not in modules
 
 
+@pytest.fixture
+def summary_report(tmp_path: Path) -> Path:
+    report_path = tmp_path / "summary.json"
+    report_path.write_text(
+        PytestSummary(
+            outcomes={"passed": 2, "failed": 1},
+            duration_seconds=0.25,
+            warnings=1,
+            deselected=3,
+            failures=(
+                PytestFailure(
+                    nodeid="tests/test_app.py::test_bad",
+                    phase="call",
+                    reason="assert 1 == 2",
+                ),
+            ),
+            coverage=PytestCoverage(total=85.0, minimum=90.0),
+        ).model_dump_json(),
+        encoding="utf-8",
+    )
+    return report_path
+
+
 @pytest.mark.parametrize(
     ("exit_code", "expected"),
     [(10, CheckStatus.PASSED), (11, CheckStatus.FAILED), (16, CheckStatus.FAILED)],
 )
-def test_pytest_outcomes_preserve_native_diagnostics(
+def test_pytest_outcomes_use_summary_without_repeating_transcripts(
     command_factory: CommandFactory,
     exit_code: int,
     expected: CheckStatus,
-    tmp_path: Path,
+    summary_report: Path,
 ) -> None:
     result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="unit-tests",
-        project_root=tmp_path,
+        report_path=summary_report,
         exit_code=exit_code,
-        stdout="  tests/test_app.py\n    assert actual == expected\n",
-        stderr="  warning: example warning\n",
+        stdout="full traceback and progress",
+        stderr="captured stderr",
     )
-
     assert result == CheckResult(
         check_id="unit-tests",
         status=expected,
         messages=(
-            "tests/test_app.py\n    assert actual == expected",
-            "warning: example warning",
+            "1 failed, 2 passed, 1 warning, 3 deselected in 0.25s",
+            "FAILED tests/test_app.py::test_bad: assert 1 == 2",
+            "Total coverage: 85.00% (required: 90.00%)",
         ),
     )
 
 
 def test_no_collected_tests_pass_with_an_explicit_explanation(
-    command_factory: CommandFactory, tmp_path: Path
+    command_factory: CommandFactory,
+    summary_report: Path,
 ) -> None:
     result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="unit-tests",
-        project_root=tmp_path,
+        report_path=summary_report,
         exit_code=15,
         stdout="no tests ran in 0.01s\n",
         stderr="",
     )
-
     assert result.status is CheckStatus.PASSED
-    assert result.messages == (
-        "no tests ran in 0.01s",
-        "No tests were collected; the check passes.",
-    )
+    assert result.messages[-1] == "No tests were collected; the check passes."
 
 
 @pytest.mark.parametrize("exit_code", [0, 1, 2, 5, 6, 12, 13, 14, 17, 127, -9])
@@ -100,12 +126,11 @@ def test_launcher_and_pytest_errors_keep_their_diagnostics(
     with pytest.raises(CheckOutputError) as raised:
         command_factory.for_name(name=CommandName.PYTEST).process_response(
             check_id="unit-tests",
-            project_root=tmp_path,
+            report_path=tmp_path / "missing.json",
             exit_code=exit_code,
             stdout="collection details\n",
             stderr="configuration problem\n",
         )
-
     assert raised.value.check_id == "unit-tests"
     assert raised.value.command is CommandName.PYTEST
     assert raised.value.problem == "collection details\nconfiguration problem"
@@ -115,17 +140,35 @@ def test_launcher_and_pytest_errors_keep_their_diagnostics(
 def test_quiet_pytest_results_do_not_require_a_terminal_summary(
     command_factory: CommandFactory,
     exit_code: int,
-    tmp_path: Path,
+    summary_report: Path,
 ) -> None:
     result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="quiet-tests",
-        project_root=tmp_path,
+        report_path=summary_report,
         exit_code=exit_code,
         stdout=" \n",
         stderr="\n",
     )
+    assert result.messages[0] == "1 failed, 2 passed, 1 warning, 3 deselected in 0.25s"
 
-    assert result.messages == ()
+
+@pytest.mark.parametrize("report", [None, b"{", b"\xff", b"{}", b'{"outcomes": []}'])
+def test_missing_and_malformed_reports_are_clear_errors(
+    command_factory: CommandFactory,
+    tmp_path: Path,
+    report: bytes | None,
+) -> None:
+    report_path = tmp_path / "summary.json"
+    if report is not None:
+        report_path.write_bytes(report)
+    with pytest.raises(CheckOutputError, match="valid summary report"):
+        command_factory.for_name(name=CommandName.PYTEST).process_response(
+            check_id="unit-tests",
+            report_path=report_path,
+            exit_code=10,
+            stdout="1 passed",
+            stderr="",
+        )
 
 
 def test_pytest_uses_the_uv_project_interpreter(
@@ -139,13 +182,15 @@ def test_pytest_uses_the_uv_project_interpreter(
     processes.exit_code = 10
 
     result = command_factory.for_name(name=CommandName.PYTEST).run(
-        check=configured_check, project_root=project_root
+        check=configured_check, project_root=project_root, output=None
     )
 
     process = processes.started[0]
     assert process.argv[:5] == ("uv", "run", "--locked", "python", "-c")
     assert "import pytest" in process.argv[5]
-    assert process.argv[6:] == ("tests",)
+    assert Path(process.argv[6]).is_absolute()
+    assert not Path(process.argv[6]).exists()
+    assert process.argv[7:] == ("tests",)
     assert process.cwd == project_root
     assert process.check_id == "unit-tests"
     assert result.check_id == "unit-tests"
@@ -178,10 +223,10 @@ def test_custom_arguments_and_config_paths_reach_pytest_unchanged(
     )
 
     command_factory.for_name(name=CommandName.PYTEST).run(
-        check=check, project_root=project_root
+        check=check, project_root=project_root, output=None
     )
 
-    assert processes.started[0].argv[6:] == (
+    assert processes.started[0].argv[7:] == (
         "integration tests/test_app.py::test_example",
         "-c",
         str(project_root / ".checksmith" / "pytest.ini"),
@@ -198,7 +243,7 @@ def test_an_unavailable_uv_reports_an_execution_error(
 
     with pytest.raises(CheckExecutionError) as raised:
         command_factory.for_name(name=CommandName.PYTEST).run(
-            check=configured_check, project_root=project_root
+            check=configured_check, project_root=project_root, output=None
         )
 
     assert raised.value.program == "uv"
@@ -252,10 +297,13 @@ def test_pytest_uses_injected_source_package_and_prerequisites(
     processes.exit_code = 10
     assert source.reads == 0
 
-    command.run(check=configured_check, project_root=tmp_path)
+    command.run(check=configured_check, project_root=tmp_path, output=None)
 
     assert source.reads == 1
-    assert package.calls == [(None, "python", ("-c", "injected launcher", "tests"))]
+    report_path = package.calls[0][2][2]
+    assert package.calls == [
+        (None, "python", ("-c", "injected launcher", report_path, "tests"))
+    ]
     assert prerequisites.calls == [(configured_check, tmp_path)]
     assert processes.started[0].argv == (
         "custom-uv",
@@ -263,6 +311,7 @@ def test_pytest_uses_injected_source_package_and_prerequisites(
         "python",
         "-c",
         "injected launcher",
+        report_path,
         "tests",
     )
 
@@ -284,7 +333,7 @@ def test_failed_prerequisites_prevent_process_execution(
     )
 
     with pytest.raises(CheckPrerequisiteError) as raised:
-        command.run(check=configured_check, project_root=tmp_path)
+        command.run(check=configured_check, project_root=tmp_path, output=None)
 
     assert raised.value is failure
     assert processes.started == []
@@ -313,8 +362,74 @@ def test_failed_launcher_reads_propagate_before_validation_or_execution(
     )
 
     with pytest.raises(FileNotFoundError):
-        command.run(check=configured_check, project_root=tmp_path)
+        command.run(check=configured_check, project_root=tmp_path, output=None)
 
     assert prerequisites.calls == []
     assert package.calls == []
     assert processes.started == []
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "warnings", "coverage", "expected"),
+    [
+        ({}, 0, None, ("No tests ran in 0.00s",)),
+        (
+            {"error": 2, "custom": 1},
+            2,
+            None,
+            ("2 errors, 1 custom, 2 warnings in 0.00s",),
+        ),
+        (
+            {"passed": 1},
+            0,
+            PytestCoverage(total=100.0, minimum=None),
+            ("1 passed in 0.00s", "Total coverage: 100.00%"),
+        ),
+        (
+            {},
+            0,
+            PytestCoverage(total=None, minimum=None),
+            ("No tests ran in 0.00s", "Total coverage: not reported"),
+        ),
+    ],
+)
+def test_summary_formats_optional_counts_and_coverage(
+    outcomes: dict[str, int],
+    warnings: int,
+    coverage: PytestCoverage | None,
+    expected: tuple[str, ...],
+) -> None:
+    summary = PytestSummary(
+        outcomes=outcomes,
+        duration_seconds=0.0,
+        warnings=warnings,
+        deselected=0,
+        failures=(),
+        coverage=coverage,
+    )
+    assert summary.messages() == expected
+
+
+def test_reusing_command_uses_separate_report_files(
+    command_factory: CommandFactory,
+    configured_check: Check,
+    project_root: Path,
+    processes: FakeProcesses,
+) -> None:
+    command = command_factory.for_name(name=CommandName.PYTEST)
+    processes.exit_code = 10
+    first = command.run(check=configured_check, project_root=project_root, output=None)
+    processes.pytest_report = PytestSummary(
+        outcomes={"passed": 3},
+        duration_seconds=1.0,
+        warnings=0,
+        deselected=0,
+        failures=(),
+        coverage=None,
+    )
+    second = command.run(check=configured_check, project_root=project_root, output=None)
+    assert first.messages == ("No tests ran in 0.00s",)
+    assert second.messages == ("3 passed in 1.00s",)
+    paths = [Path(process.argv[6]) for process in processes.started]
+    assert paths[0] != paths[1]
+    assert all(not path.parent.exists() for path in paths)

@@ -101,7 +101,7 @@ def test_real_uv_setup_errors_cannot_pass_an_absent_test_suite(
         checks=(check,),
         commands=command_factory.registry(),
         project_root=project,
-    ).check()
+    ).check(output=None)
 
     assert len(output.results) == 1
     assert output.results[0].status is CheckStatus.ERROR

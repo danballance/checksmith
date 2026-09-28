@@ -13,6 +13,7 @@ import pytest
 from coverage import Coverage
 
 from checksmith.commands import _pytest_launcher
+from checksmith.commands.pytest import PytestSummary
 from checksmith.commands.registry import CommandFactory
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
 from checksmith.dtos import CheckStatus, CommandName
@@ -34,7 +35,8 @@ def run_launcher(
             return _pytest_launcher.PytestLauncher(
                 invoke_pytest=pytest.main, error_stream=sys.stderr
             ).run(
-                args=["-q", "--import-mode=importlib", "-p", "no:cacheprovider", *args]
+                args=["-q", "--import-mode=importlib", "-p", "no:cacheprovider", *args],
+                report_path=tmp_path / "summary.json",
             )
         finally:
             for name in set(sys.modules) - module_names:
@@ -48,6 +50,7 @@ def run_launcher(
 @pytest.mark.parametrize("exit_code", range(7))
 def test_known_pytest_exit_codes_are_distinct_from_uv_failures(
     exit_code: int,
+    tmp_path: Path,
 ) -> None:
     def fake_main(args: list[str], plugins: list[object]) -> int:
         assert args == ["tests", "-x"]
@@ -59,10 +62,13 @@ def test_known_pytest_exit_codes_are_distinct_from_uv_failures(
         invoke_pytest=fake_main, error_stream=StringIO()
     )
 
-    assert launcher.run(args=["tests", "-x"]) == 10 + exit_code
+    assert (
+        launcher.run(args=["tests", "-x"], report_path=tmp_path / "summary.json")
+        == 10 + exit_code
+    )
 
 
-def test_unknown_pytest_exit_code_is_an_execution_error() -> None:
+def test_unknown_pytest_exit_code_is_an_execution_error(tmp_path: Path) -> None:
     def fake_main(args: list[str], plugins: list[object]) -> int:
         return 42
 
@@ -71,7 +77,7 @@ def test_unknown_pytest_exit_code_is_an_execution_error() -> None:
         invoke_pytest=fake_main, error_stream=error_stream
     )
 
-    assert launcher.run(args=["tests"]) == 2
+    assert launcher.run(args=["tests"], report_path=tmp_path / "summary.json") == 2
     assert "pytest returned an unexpected exit code: 42" in error_stream.getvalue()
 
 
@@ -268,7 +274,17 @@ def test_source_can_run_in_a_project_without_checksmith_installed(
         + launcher_path.read_text()
     )
     result = subprocess.run(
-        [sys.executable, "-I", "-c", source, "tests", "-q", "-p", "no:cacheprovider"],
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            source,
+            str(tmp_path / "summary.json"),
+            "tests",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+        ],
         cwd=tmp_path,
         env=os.environ | {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""},
         capture_output=True,
@@ -314,16 +330,26 @@ def run_coverage_launcher(
             *, extra_arguments: list[str], load_plugin: bool
         ) -> subprocess.CompletedProcess[str]:
             plugin_arguments = ["-p", "pytest_cov.plugin"] if load_plugin else []
+            arguments = check.arguments
+            if any(
+                argument.startswith("--cov-report=") for argument in extra_arguments
+            ):
+                arguments = tuple(
+                    argument
+                    for argument in arguments
+                    if not argument.startswith("--cov-report=")
+                )
             return subprocess.run(
                 [
                     sys.executable,
                     "-c",
                     source,
+                    str(tmp_path / "summary.json"),
                     *plugin_arguments,
                     "-p",
                     "no:cacheprovider",
                     "--import-mode=importlib",
-                    *check.arguments,
+                    *arguments,
                     *extra_arguments,
                 ],
                 cwd=tmp_path,
@@ -375,7 +401,7 @@ def test_default_coverage_minimum_controls_the_check_result(
     assert completed.returncode == exit_code, completed.stdout + completed.stderr
     result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="pytest",
-        project_root=tmp_path,
+        report_path=tmp_path / "summary.json",
         exit_code=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
@@ -462,7 +488,7 @@ def test_empty_suites_are_exempt_from_the_default_coverage_minimum(
     assert completed.returncode == 15, completed.stdout + completed.stderr
     result = command_factory.for_name(name=CommandName.PYTEST).process_response(
         check_id="pytest",
-        project_root=tmp_path,
+        report_path=tmp_path / "summary.json",
         exit_code=completed.returncode,
         stdout=completed.stdout,
         stderr=completed.stderr,
@@ -503,7 +529,7 @@ def test_coverage_setup_errors_are_not_exempted_for_missing_tests(
     with pytest.raises(CheckOutputError, match=diagnostic):
         command_factory.for_name(name=CommandName.PYTEST).process_response(
             check_id="pytest",
-            project_root=tmp_path,
+            report_path=tmp_path / "summary.json",
             exit_code=completed.returncode,
             stdout=completed.stdout,
             stderr=completed.stderr,
@@ -555,7 +581,7 @@ def test_broken_collection_is_not_an_empty_suite_with_coverage(
     ],
 )
 def test_coverage_config_paths_do_not_influence_pytest_project_discovery(
-    arguments: list[str], expected: list[str]
+    arguments: list[str], expected: list[str], tmp_path: Path
 ) -> None:
     def fake_main(args: list[str], plugins: list[object]) -> int:
         assert args == expected
@@ -565,10 +591,10 @@ def test_coverage_config_paths_do_not_influence_pytest_project_discovery(
         invoke_pytest=fake_main, error_stream=StringIO()
     )
 
-    assert launcher.run(args=arguments) == 10
+    assert launcher.run(args=arguments, report_path=tmp_path / "summary.json") == 10
 
 
-def test_reusing_a_launcher_creates_fresh_collection_state() -> None:
+def test_reusing_a_launcher_creates_fresh_collection_state(tmp_path: Path) -> None:
     seen: list[_pytest_launcher._ChecksmithPlugin] = []
 
     def invoke(args: list[str], plugins: list[object]) -> int:
@@ -583,6 +609,168 @@ def test_reusing_a_launcher_creates_fresh_collection_state() -> None:
         invoke_pytest=invoke, error_stream=StringIO()
     )
 
-    assert launcher.run(args=["tests"]) == 12
-    assert launcher.run(args=["tests"]) == 10
+    assert launcher.run(args=["tests"], report_path=tmp_path / "summary.json") == 12
+    assert launcher.run(args=["tests"], report_path=tmp_path / "summary.json") == 10
     assert seen[0] is not seen[1]
+
+
+@pytest.mark.parametrize("quiet", [[], ["-qq"], ["-rN", "--tb=no"]])
+def test_structured_summary_counts_outcomes_without_terminal_parsing(
+    tmp_path: Path,
+    run_launcher: Callable[[list[str]], int],
+    quiet: list[str],
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_outcomes.py").write_text(
+        "import pytest, warnings\n"
+        "def test_pass():\n    warnings.warn('test warning')\n"
+        "def test_fail():\n    assert 1 == 2\n"
+        "@pytest.mark.skip(reason='skip reason')\ndef test_skip():\n    pass\n"
+        "@pytest.mark.xfail(reason='expected')\ndef test_xfail():\n    assert False\n"
+        "@pytest.mark.xfail(reason='unexpected')\ndef test_xpass():\n    pass\n"
+        "def test_deselected():\n    pass\n",
+        encoding="utf-8",
+    )
+    assert run_launcher(["tests", "-k", "not deselected", *quiet]) == 11
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.outcomes == {
+        "passed": 1,
+        "failed": 1,
+        "skipped": 1,
+        "xfailed": 1,
+        "xpassed": 1,
+    }
+    assert report.warnings == 1
+    assert report.deselected == 1
+    assert report.duration_seconds > 0
+    assert report.coverage is None
+    assert len(report.failures) == 1
+    assert report.failures[0].nodeid == "tests/test_outcomes.py::test_fail"
+    assert report.failures[0].reason == "assert 1 == 2"
+
+
+@pytest.mark.parametrize("phase", ["setup", "teardown"])
+def test_fixture_errors_have_one_error_count_and_short_reason(
+    tmp_path: Path,
+    run_launcher: Callable[[list[str]], int],
+    phase: str,
+) -> None:
+    (tmp_path / "tests").mkdir()
+    body = "    raise RuntimeError('fixture broken')\n"
+    if phase == "teardown":
+        body = "    yield\n" + body
+    (tmp_path / "tests" / "test_fixture.py").write_text(
+        "import pytest\n@pytest.fixture\ndef fixture():\n"
+        + body
+        + "def test_fixture(fixture):\n    pass\n",
+        encoding="utf-8",
+    )
+    assert run_launcher(["tests", "-qq"]) == 11
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.outcomes == (
+        {"error": 1} if phase == "setup" else {"passed": 1, "error": 1}
+    )
+    assert len(report.failures) == 1
+    assert report.failures[0].phase == phase
+    assert report.failures[0].reason == "RuntimeError: fixture broken"
+    assert f"({phase}): RuntimeError: fixture broken" in report.messages()[1]
+
+
+def test_launcher_rejects_relative_report_path_before_running_pytest() -> None:
+    def never_called(args: list[str], plugins: list[object]) -> int:
+        pytest.fail("pytest must not start with an invalid report path")
+
+    launcher = _pytest_launcher.PytestLauncher(
+        invoke_pytest=never_called, error_stream=StringIO()
+    )
+    with pytest.raises(ValueError, match="must be absolute"):
+        launcher.run(args=[], report_path=Path("summary.json"))
+
+
+def test_summary_collects_skips_during_collection(
+    tmp_path: Path,
+    run_launcher: Callable[[list[str]], int],
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_skip.py").write_text(
+        "import pytest\npytest.skip('module unavailable', allow_module_level=True)\n",
+        encoding="utf-8",
+    )
+    assert run_launcher(["tests"]) == 15
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.outcomes == {"skipped": 1}
+    assert report.failures == ()
+
+
+def test_coverage_summary_survives_disabled_terminal_reports(
+    tmp_path: Path,
+    run_coverage_launcher: CoverageLauncher,
+) -> None:
+    (tmp_path / "application.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_application.py").write_text(
+        "import application\ndef test_value():\n    assert application.VALUE == 1\n",
+        encoding="utf-8",
+    )
+    completed = run_coverage_launcher(
+        extra_arguments=["--cov-report=", "--cov-fail-under=0"],
+        load_plugin=True,
+    )
+    assert completed.returncode == 10, completed.stdout + completed.stderr
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.coverage is not None
+    assert report.coverage.total == 100.0
+    assert report.coverage.minimum == 0.0
+    assert "Total coverage" not in completed.stdout
+    assert "Total coverage: 100.00% (required: 0.00%)" in report.messages()
+
+
+def test_disabling_coverage_omits_summary_coverage(
+    tmp_path: Path,
+    run_coverage_launcher: CoverageLauncher,
+) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_application.py").write_text(
+        "def test_value():\n    assert True\n",
+        encoding="utf-8",
+    )
+    completed = run_coverage_launcher(extra_arguments=["--no-cov"], load_plugin=True)
+    assert completed.returncode == 10, completed.stdout + completed.stderr
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.coverage is None
+
+
+def test_empty_suite_passes_when_coverage_reports_are_disabled(
+    tmp_path: Path,
+    run_coverage_launcher: CoverageLauncher,
+) -> None:
+    completed = run_coverage_launcher(
+        extra_arguments=["--cov-report=", "--cov-fail-under=0"],
+        load_plugin=True,
+    )
+    assert completed.returncode == 15, completed.stdout + completed.stderr
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.coverage is not None
+    assert report.coverage.total is None
+    assert report.outcomes == {}
+
+
+def test_failed_tests_keep_coverage_total_when_failure_reports_are_suppressed(
+    tmp_path: Path,
+    run_coverage_launcher: CoverageLauncher,
+) -> None:
+    (tmp_path / "application.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_application.py").write_text(
+        "import application\ndef test_value():\n    assert application.VALUE == 2\n",
+        encoding="utf-8",
+    )
+    completed = run_coverage_launcher(
+        extra_arguments=["--no-cov-on-fail"], load_plugin=True
+    )
+    assert completed.returncode == 11, completed.stdout + completed.stderr
+    report = PytestSummary.model_validate_json((tmp_path / "summary.json").read_text())
+    assert report.coverage is not None
+    assert report.coverage.total == 100.0
+    assert report.outcomes == {"failed": 1}
+    assert "Total coverage" not in completed.stdout
