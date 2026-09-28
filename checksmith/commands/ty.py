@@ -5,7 +5,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
@@ -44,7 +44,7 @@ TY_REPORTED: Final = frozenset({0, 1})
 TY_FORMAT_ARGUMENTS: Final = "--output-format gitlab"
 
 
-class TyCommand(Command):
+class TyCommand(CapturedOutputCommand):
     @property
     def name(self) -> CommandName:
         return CommandName.TY

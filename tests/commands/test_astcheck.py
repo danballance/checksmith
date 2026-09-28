@@ -83,7 +83,7 @@ def test_command_runs_astcheck_from_the_checksmith_distribution(
     processes.stdout = CLEAN_REPORT
 
     result = command_factory.for_name(name=CommandName.ASTCHECK).run(
-        check=check, project_root=tmp_path
+        check=check, project_root=tmp_path, output=None
     )
 
     assert result.status is CheckStatus.PASSED
@@ -101,9 +101,7 @@ def test_command_runs_astcheck_from_the_checksmith_distribution(
     assert processes.started[0].cwd == tmp_path
 
 
-def test_clean_analysis_passes(
-    tmp_path: Path, command_factory: CommandFactory
-) -> None:
+def test_clean_analysis_passes(tmp_path: Path, command_factory: CommandFactory) -> None:
     result = command_factory.for_name(name=CommandName.ASTCHECK).process_response(
         check_id="custom-analysis",
         project_root=tmp_path,

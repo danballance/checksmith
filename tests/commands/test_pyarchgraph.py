@@ -5,7 +5,7 @@ from typing import Literal
 import pytest
 from pydantic import JsonValue
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.commands.pyarchgraph import PyArchGraphCommand, PyArchGraphReport
 from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
@@ -226,10 +226,10 @@ def test_command_uses_normal_subprocess_execution(
     processes.stdout = HEALTHY_REPORT
 
     result = command_factory.for_name(name=CommandName.PYARCHGRAPH).run(
-        check=check, project_root=tmp_path
+        check=check, project_root=tmp_path, output=None
     )
 
-    assert PyArchGraphCommand.run is Command.run
+    assert PyArchGraphCommand.run is CapturedOutputCommand.run
     assert result.status is CheckStatus.PASSED
     assert result.messages == HEALTHY_MESSAGES
     assert processes.started[0].argv == check.argv

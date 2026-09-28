@@ -5,7 +5,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
@@ -50,7 +50,7 @@ RUFF_FORMAT_ARGUMENTS: Final = "--output-format json"
 """What a check's own arguments must contain for this command to read it."""
 
 
-class RuffCommand(Command):
+class RuffCommand(CapturedOutputCommand):
     """Ruff, a Python linter and formatter, read through its JSON reporter."""
 
     @property

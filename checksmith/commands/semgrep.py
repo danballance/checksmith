@@ -5,7 +5,7 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
@@ -44,7 +44,7 @@ class SemgrepReport(BaseModel):
 SEMGREP_REPORTED: Final = frozenset({0, 1})
 
 
-class SemgrepCommand(Command):
+class SemgrepCommand(CapturedOutputCommand):
     @property
     def name(self) -> CommandName:
         return CommandName.SEMGREP

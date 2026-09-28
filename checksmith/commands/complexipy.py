@@ -6,10 +6,11 @@ from typing import Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
+from checksmith.processes import ProcessOutput
 
 logger = logging.getLogger(__name__)
 
@@ -32,12 +33,14 @@ class ComplexipyDiagnostic(BaseModel):
     complexity: int = Field(ge=0, strict=True)
 
 
-class ComplexipyCommand(Command):
+class ComplexipyCommand(CapturedOutputCommand):
     @property
     def name(self) -> CommandName:
         return CommandName.COMPLEXIPY
 
-    def run(self, *, check: Check, project_root: Path) -> CheckResult:
+    def run(
+        self, *, check: Check, project_root: Path, output: ProcessOutput | None
+    ) -> CheckResult:
         arguments = check.arguments
         if "--" in arguments:
             arguments = arguments[: arguments.index("--")]
@@ -60,7 +63,7 @@ class ComplexipyCommand(Command):
                         "once, using bare flags or '=true', before '--'."
                     ),
                 )
-        return super().run(check=check, project_root=project_root)
+        return super().run(check=check, project_root=project_root, output=output)
 
     def process_response(
         self,

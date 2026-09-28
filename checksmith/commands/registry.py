@@ -1,7 +1,8 @@
 from collections.abc import Mapping
+from typing import Literal, overload
 
 from checksmith.commands.astcheck import AstcheckCommand
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand, Command
 from checksmith.commands.complexipy import ComplexipyCommand
 from checksmith.commands.import_linter import (
     ImportLinterCommand,
@@ -32,6 +33,27 @@ class CommandFactory:
         self._import_linter_prerequisites = import_linter_prerequisites
         self._launcher_source = launcher_source
         self._pytest_package = pytest_package
+
+    @overload
+    def for_name(self, *, name: Literal[CommandName.PYTEST]) -> PytestCommand: ...
+
+    @overload
+    def for_name(
+        self,
+        *,
+        name: Literal[
+            CommandName.ASTCHECK,
+            CommandName.COMPLEXIPY,
+            CommandName.RUFF,
+            CommandName.SEMGREP,
+            CommandName.IMPORT_LINTER,
+            CommandName.TY,
+            CommandName.PYARCHGRAPH,
+        ],
+    ) -> CapturedOutputCommand: ...
+
+    @overload
+    def for_name(self, *, name: CommandName) -> Command: ...
 
     def for_name(self, *, name: CommandName) -> Command:
         """Return the one command that answers to ``name``.

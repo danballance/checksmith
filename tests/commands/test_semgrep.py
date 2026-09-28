@@ -224,7 +224,7 @@ def test_semgrep_runs_through_uvx_with_the_configured_arguments(
     )
 
     result = command_factory.for_name(name=CommandName.SEMGREP).run(
-        check=check, project_root=PROJECT_ROOT
+        check=check, project_root=PROJECT_ROOT, output=None
     )
 
     assert processes.started[0].argv == (

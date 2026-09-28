@@ -164,24 +164,15 @@ class ScriptedCommand(Command):
         self.eligibility_checks.append(check.id)
         return self.runnable
 
-    def run(self, *, check: Check, project_root: Path) -> CheckResult:
+    def run(
+        self, *, check: Check, project_root: Path, output: ProcessOutput | None
+    ) -> CheckResult:
         self.executed.append(check)
         self.roots.append(project_root)
         outcome = self.outcomes[check.id]
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
-
-    def process_response(
-        self,
-        *,
-        check_id: str,
-        project_root: Path,
-        exit_code: int,
-        stdout: str,
-        stderr: str,
-    ) -> CheckResult:
-        raise AssertionError("Scripted command does not process subprocess output")
 
 
 class PythonProcessExecutor:
@@ -195,12 +186,14 @@ class PythonProcessExecutor:
         argv: tuple[str, ...],
         cwd: Path,
         heartbeat_interval_seconds: float,
+        output: ProcessOutput | None,
     ) -> subprocess.CompletedProcess[str]:
         return SubprocessExecutor(runtime=LocalProcessRuntime()).run(
             check_id=check_id,
             argv=(sys.executable, "-c", self.source),
             cwd=cwd,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            output=output,
         )
 
 

@@ -9,7 +9,7 @@ from typing import Final, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError, CheckPrerequisiteError
@@ -171,7 +171,7 @@ class ImportLinterPrerequisites:
             )
 
 
-class ImportLinterCommand(Command):
+class ImportLinterCommand(CapturedOutputCommand):
     def __init__(
         self,
         executor: ProcessExecutor,

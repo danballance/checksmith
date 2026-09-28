@@ -47,7 +47,11 @@ def test_a_failed_run_names_the_check_it_was_given_rather_than_the_command(
     command = command_factory.for_name(name=CommandName.RUFF)
 
     with pytest.raises(CheckOutputError) as raised:
-        command.run(check=ruff_check(check_id="second-lint"), project_root=PROJECT_ROOT)
+        command.run(
+            check=ruff_check(check_id="second-lint"),
+            project_root=PROJECT_ROOT,
+            output=None,
+        )
 
     assert "second-lint" in str(raised.value)
 
@@ -60,7 +64,9 @@ def test_a_clean_run_of_the_real_ruff_command_passes(
     processes.stdout = "[]"
     command = command_factory.for_name(name=CommandName.RUFF)
 
-    result = command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    result = command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert result == CheckResult(
         check_id="lint", status=CheckStatus.PASSED, messages=()

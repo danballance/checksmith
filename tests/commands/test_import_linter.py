@@ -496,7 +496,7 @@ def test_import_linter_runs_through_uvx_with_unchanged_arguments(
     )
 
     result = command_factory.for_name(name=CommandName.IMPORT_LINTER).run(
-        check=check, project_root=PROJECT_ROOT
+        check=check, project_root=PROJECT_ROOT, output=None
     )
 
     assert processes.started[0].argv == (

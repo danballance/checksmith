@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from checksmith.commands.astcheck import AstcheckCommand
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand, Command
 from checksmith.commands.complexipy import ComplexipyCommand
 from checksmith.commands.import_linter import ImportLinterCommand
 from checksmith.commands.pyarchgraph import PyArchGraphCommand
@@ -96,7 +96,6 @@ def test_each_registered_command_answers_to_the_key_it_is_filed_under(
             0,
             HEALTHY_REPORT,
         ),
-        (CommandName.PYTEST, 10, "1 passed"),
     ],
 )
 def test_a_command_can_process_different_checks_without_retaining_check_state(
@@ -106,6 +105,7 @@ def test_a_command_can_process_different_checks_without_retaining_check_state(
     command_factory: CommandFactory,
 ) -> None:
     command = command_factory.for_name(name=command_name)
+    assert isinstance(command, CapturedOutputCommand)
     initial_state = vars(command).copy()
 
     first = command.process_response(

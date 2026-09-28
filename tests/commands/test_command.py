@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand, Command
 from checksmith.config import Check
 from checksmith.dtos import CheckResult, CheckStatus, CommandName, PackageType
 from checksmith.errors import CheckExecutionError, CheckOutputError
@@ -18,7 +18,7 @@ from checksmith.prerequisites import (
     UvPrerequisites,
     UvProjectPrerequisites,
 )
-from checksmith.processes import ProcessExecutor
+from checksmith.processes import ProcessExecutor, ProcessOutput
 from tests.conftest import FakeProcesses, make_command_factory
 
 PROJECT_ROOT = Path("/workspace/project")
@@ -50,7 +50,7 @@ def ruff_check(*, check_id: str) -> Check:
     )
 
 
-class ProcessOutput(BaseModel):
+class CapturedResponse(BaseModel):
     """Everything one call to ``process_response`` was handed."""
 
     model_config = ConfigDict(frozen=True)
@@ -62,7 +62,7 @@ class ProcessOutput(BaseModel):
     stderr: str
 
 
-class RecordingCommand(Command):
+class RecordingCommand(CapturedOutputCommand):
     """A command that records the process output it was asked to read.
 
     Every ``process_response`` Checksmith ships is still a stub, so this is the
@@ -73,7 +73,7 @@ class RecordingCommand(Command):
         self, executor: ProcessExecutor, uv_prerequisites: UvPrerequisites
     ) -> None:
         super().__init__(executor=executor, uv_prerequisites=uv_prerequisites)
-        self.read: list[ProcessOutput] = []
+        self.read: list[CapturedResponse] = []
 
     @property
     def name(self) -> CommandName:
@@ -89,7 +89,7 @@ class RecordingCommand(Command):
         stderr: str,
     ) -> CheckResult:
         self.read.append(
-            ProcessOutput(
+            CapturedResponse(
                 check_id=check_id,
                 project_root=project_root,
                 exit_code=exit_code,
@@ -149,7 +149,9 @@ def test_a_check_is_started_as_the_vector_it_resolves_to(
     processes: FakeProcesses,
 ) -> None:
     """A vector, never a command string: nothing reaches a shell to re-parse it."""
-    recording_command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    recording_command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert processes.started[0].argv == (
         "uvx",
@@ -166,7 +168,9 @@ def test_a_check_is_started_in_the_project_root_it_was_given(
     processes: FakeProcesses,
 ) -> None:
     """The tool runs where the project is, not where the user happened to stand."""
-    recording_command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    recording_command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert processes.started[0].cwd == PROJECT_ROOT
 
@@ -175,7 +179,9 @@ def test_process_diagnostics_receive_the_check_id_and_reporting_interval(
     recording_command: RecordingCommand,
     processes: FakeProcesses,
 ) -> None:
-    recording_command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    recording_command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert processes.started[0].check_id == "lint"
     assert processes.started[0].heartbeat_interval_seconds == 10.0
@@ -199,6 +205,7 @@ def test_both_command_formats_are_logged_before_launch(
             argv: tuple[str, ...],
             cwd: Path,
             heartbeat_interval_seconds: float,
+            output: ProcessOutput | None,
         ) -> subprocess.CompletedProcess[str]:
             assert f"lint argv={argv} cwd={cwd}" in caplog.messages
             message = next(
@@ -212,6 +219,7 @@ def test_both_command_formats_are_logged_before_launch(
                 argv=argv,
                 cwd=cwd,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
+                output=output,
             )
 
     command = RecordingCommand(
@@ -221,7 +229,7 @@ def test_both_command_formats_are_logged_before_launch(
         ),
     )
 
-    command.run(check=check, project_root=project_root)
+    command.run(check=check, project_root=project_root, output=None)
 
     assert len(processes.started) == 1
     assert caplog.messages[-1] == "lint processing output"
@@ -236,7 +244,7 @@ def test_a_program_that_cannot_be_started_names_the_check_that_wanted_it(
 
     with pytest.raises(CheckExecutionError) as raised:
         recording_command.run(
-            check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT
+            check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
         )
 
     assert raised.value.check_id == "lint"
@@ -254,7 +262,9 @@ def test_nothing_is_read_when_nothing_ran(
     command = recording_command
 
     with pytest.raises(CheckExecutionError):
-        command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+        command.run(
+            check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+        )
 
     assert command.read == []
 
@@ -284,6 +294,7 @@ def test_invalid_utf8_output_is_a_check_output_error(
             argv: tuple[str, ...],
             cwd: Path,
             heartbeat_interval_seconds: float,
+            output: ProcessOutput | None,
         ) -> subprocess.CompletedProcess[str]:
             raise decoding_error
 
@@ -298,7 +309,7 @@ def test_invalid_utf8_output_is_a_check_output_error(
 
     with pytest.raises(CheckOutputError) as raised:
         command_factory.for_name(name=command_name).run(
-            check=check, project_root=PROJECT_ROOT
+            check=check, project_root=PROJECT_ROOT, output=None
         )
 
     assert raised.value.check_id == "encoding-check"
@@ -321,10 +332,12 @@ def test_what_the_process_returned_is_handed_to_the_code_that_reads_it(
     processes.stderr = "and grumbled"
     command = recording_command
 
-    command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert command.read == [
-        ProcessOutput(
+        CapturedResponse(
             check_id="lint",
             project_root=PROJECT_ROOT,
             exit_code=1,
@@ -342,7 +355,9 @@ def test_a_nonzero_exit_is_read_rather_than_raised(
     processes.exit_code = 1
     command = recording_command
 
-    result = command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    result = command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert result.status is CheckStatus.FAILED
 
@@ -353,7 +368,7 @@ def test_the_result_of_reading_the_output_is_the_result_of_the_run(
 ) -> None:
     """``run`` starts and collects; judging what came back is not its job."""
     result = recording_command.run(
-        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
     )
 
     assert result == CheckResult(
@@ -370,6 +385,8 @@ def test_the_project_root_is_handed_to_the_code_that_reads_the_output(
     """A tool reporting absolute paths needs something to be read against."""
     command = recording_command
 
-    command.run(check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT)
+    command.run(
+        check=ruff_check(check_id="lint"), project_root=PROJECT_ROOT, output=None
+    )
 
     assert command.read[0].project_root == PROJECT_ROOT

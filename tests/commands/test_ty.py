@@ -266,7 +266,7 @@ def test_ty_runs_the_configured_arguments_under_a_custom_check_id(
     )
 
     result = command_factory.for_name(name=CommandName.TY).run(
-        check=check, project_root=PROJECT_ROOT
+        check=check, project_root=PROJECT_ROOT, output=None
     )
 
     assert processes.started[0].argv == (

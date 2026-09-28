@@ -257,7 +257,7 @@ def test_complexipy_runs_the_unchanged_configured_arguments(
     )
 
     result = command_factory.for_name(name=CommandName.COMPLEXIPY).run(
-        check=check, project_root=PROJECT_ROOT
+        check=check, project_root=PROJECT_ROOT, output=None
     )
 
     assert processes.started[0].argv == (
@@ -303,7 +303,7 @@ def test_complexipy_rejects_missing_or_disabled_output_flags_before_execution(
 
     with pytest.raises(CheckOutputError, match="--plain --failed"):
         command_factory.for_name(name=CommandName.COMPLEXIPY).run(
-            check=check, project_root=PROJECT_ROOT
+            check=check, project_root=PROJECT_ROOT, output=None
         )
 
     assert processes.started == []

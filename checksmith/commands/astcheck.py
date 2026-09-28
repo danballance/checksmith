@@ -3,12 +3,12 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from astcheck.domain.models import AnalysisError, AnalysisReport, SourceLocation
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
 
-class AstcheckCommand(Command):
+class AstcheckCommand(CapturedOutputCommand):
     @property
     def name(self) -> CommandName:
         return CommandName.ASTCHECK

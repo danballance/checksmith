@@ -3,7 +3,7 @@ from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from checksmith.commands.command import Command
+from checksmith.commands.command import CapturedOutputCommand
 from checksmith.dtos import CheckResult, CheckStatus, CommandName
 from checksmith.errors import CheckOutputError
 
@@ -242,7 +242,7 @@ class PyArchGraphReport(ReportModel):
         return self
 
 
-class PyArchGraphCommand(Command):
+class PyArchGraphCommand(CapturedOutputCommand):
     @property
     def name(self) -> CommandName:
         return CommandName.PYARCHGRAPH

@@ -99,6 +99,16 @@ class Command(ABC):
             len(completed.stderr),
         )
         logger.debug("%s processing output", check.id)
+        return completed
+
+
+class CapturedOutputCommand(Command):
+    def run(
+        self, *, check: Check, project_root: Path, output: ProcessOutput | None
+    ) -> CheckResult:
+        completed = self._execute_argv(
+            check=check, project_root=project_root, argv=check.argv, output=output
+        )
         return self.process_response(
             check_id=check.id,
             project_root=project_root,
