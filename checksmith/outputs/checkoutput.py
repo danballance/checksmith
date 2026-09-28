@@ -38,7 +38,10 @@ class CheckOutput(CliOutput):
                     status = Text("PASS", style="green")
                 case CheckStatus.SKIPPED:
                     status = Text("SKIP", style="yellow")
-            if any("\n" in message for message in result.messages):
+            has_details = any("\n" in message for message in result.messages)
+            if result.status is CheckStatus.PASSED and has_details:
+                messages = result.messages[0].partition("\n")[0]
+            elif result.status in (CheckStatus.FAILED, CheckStatus.ERROR) and has_details:
                 summary, separator, remainder = result.messages[0].partition("\n")
                 detail_messages = list(result.messages[1:])
                 if separator:

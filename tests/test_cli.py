@@ -1423,10 +1423,19 @@ def test_cli_reports_pyarchgraph_findings(
     else:
         assert "architecture" in result.stdout
         assert ("PASS" if status is CheckStatus.PASSED else "FAIL") in result.stdout
-        assert "Selected view:" in result.stdout
-        assert "determines pass/fail" in result.stdout
-        assert result.stdout.index("Selected view:") > result.stdout.index("└")
-        if status is CheckStatus.FAILED:
+        if status is CheckStatus.PASSED:
+            assert "No error findings." in result.stdout
+            assert "Selected view:" not in result.stdout
+            assert "determines pass/fail" not in result.stdout
+            assert "Finding 1 of" not in result.stdout
+            assert "Warning [group-size]" not in result.stdout
+            assert "Application package" not in result.stdout
+            assert "Other views" not in result.stdout
+            assert result.stdout.rstrip().endswith("┘")
+        else:
+            assert "Selected view:" in result.stdout
+            assert "determines pass/fail" in result.stdout
+            assert result.stdout.index("Selected view:") > result.stdout.index("└")
             assert "Finding 1 of" in result.stdout
             assert result.stdout.index("Finding 1 of") < result.stdout.index("Other views")
 

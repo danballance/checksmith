@@ -328,7 +328,79 @@ def test_multiple_detail_panels_follow_check_order() -> None:
         panel.title.plain
         for panel in panels
         if isinstance(panel, Panel) and isinstance(panel.title, Text)
-    ] == ["passed | PASS", "failed | FAIL", "error | ERROR", "skipped | SKIP"]
+    ] == ["failed | FAIL", "error | ERROR"]
+
+
+@pytest.mark.parametrize(
+    "messages",
+    [
+        ("No error findings.", "Selected view\nAnalysis details"),
+        ("No error findings.\nAnalysis details", "Additional detail"),
+    ],
+)
+def test_passing_checks_show_only_the_summary_and_preserve_json_details(
+    messages: tuple[str, ...], render: Callable[[CliOutput], str]
+) -> None:
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="pyarchgraph-modules",
+                status=CheckStatus.PASSED,
+                messages=messages,
+            ),
+        )
+    )
+
+    assert isinstance(output.__rich__(), Table)
+    rendered = render(output)
+
+    assert "pyarchgraph-modules" in rendered
+    assert "PASS" in rendered
+    assert "No error findings." in rendered
+    assert "Selected view" not in rendered
+    assert "Analysis details" not in rendered
+    assert "Additional detail" not in rendered
+    assert CheckOutput.model_validate_json(output.model_dump_json()) == output
+
+
+def test_passing_checks_preserve_short_inline_notices(
+    render: Callable[[CliOutput], str],
+) -> None:
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="pytest",
+                status=CheckStatus.PASSED,
+                messages=("No tests ran.", "No tests were collected; the check passes."),
+            ),
+        )
+    )
+
+    assert isinstance(output.__rich__(), Table)
+    rendered = render(output)
+
+    assert all(message in rendered for message in output.results[0].messages)
+
+
+def test_skipped_checks_keep_multiline_explanations_in_the_table(
+    render: Callable[[CliOutput], str],
+) -> None:
+    output = CheckOutput(
+        results=(
+            CheckResult(
+                check_id="architecture",
+                status=CheckStatus.SKIPPED,
+                messages=("Missing prerequisite.\nRequired source directory: src",),
+            ),
+        )
+    )
+
+    assert isinstance(output.__rich__(), Table)
+    rendered = render(output)
+
+    assert "SKIP" in rendered
+    assert "Missing prerequisite." in rendered
+    assert "Required source directory: src" in rendered
 
 
 def test_json_preserves_order_across_all_result_statuses() -> None:
