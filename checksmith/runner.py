@@ -13,6 +13,7 @@ from checksmith.errors import (
     CheckPrerequisiteError,
 )
 from checksmith.outputs.checkoutput import CheckOutput
+from checksmith.processes import ProcessOutput
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ class Runner:
         self.commands = commands
         self.project_root = project_root
 
-    def check(self) -> CheckOutput:
+    def check(self, *, output: ProcessOutput | None) -> CheckOutput:
         """Run every check through its command and collect the result."""
         if len(self.checks) == 0:
             raise ValueError("a run needs at least one check; none were configured")
@@ -53,7 +54,9 @@ class Runner:
                 if command.check_is_runnable(
                     check=check, project_root=self.project_root
                 ):
-                    result = command.run(check=check, project_root=self.project_root)
+                    result = command.run(
+                        check=check, project_root=self.project_root, output=output
+                    )
                 else:
                     result = CheckResult(
                         check_id=check.id,

@@ -7,6 +7,7 @@ from checksmith.config import Config
 from checksmith.dtos import CommandName
 from checksmith.errors import ChecksmithError
 from checksmith.outputs.checkoutput import CheckOutput
+from checksmith.processes import ProcessOutput
 from checksmith.runner import Runner
 
 
@@ -29,6 +30,7 @@ class CheckService:
         config_file: Path,
         working_directory: Path,
         check_id: str | None,
+        output: ProcessOutput | None,
     ) -> CheckOutput:
         config = self._loader.load(
             config_file=config_file, working_directory=working_directory
@@ -45,4 +47,4 @@ class CheckService:
             checks=checks,
             commands=self._commands.registry(),
             project_root=config.project_root,
-        ).check()
+        ).check(output=output)

@@ -12,12 +12,12 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from checksmith.commands.import_linter import ImportLinterPrerequisites
-from checksmith.commands.pytest import PackagedLauncherSource
+from checksmith.commands.pytest import PackagedLauncherSource, PytestSummary
 from checksmith.commands.registry import CommandFactory
 from checksmith.logs import LOGGER_NAME
 from checksmith.packages import UvPackage
 from checksmith.prerequisites import LocalProjectFiles, UvProjectPrerequisites
-from checksmith.processes import ProcessExecutor
+from checksmith.processes import ProcessExecutor, ProcessOutput
 
 
 @pytest.fixture
@@ -154,6 +154,7 @@ class FakeProcesses:
         argv: tuple[str, ...],
         cwd: Path,
         heartbeat_interval_seconds: float,
+        output: ProcessOutput | None,
     ) -> subprocess.CompletedProcess[str]:
         if self.refusal is not None:
             # Nothing is recorded: a process that never started is not one.

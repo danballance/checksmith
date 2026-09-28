@@ -198,3 +198,12 @@ class CheckOutputError(ChecksmithError):
         self.summary = summary
         self.problem = problem
         super().__init__(f"Check '{check_id}': {summary}:\n{problem}")
+
+
+class ProcessOutputError(ChecksmithError):
+    def __init__(self, *, check_id: str, problem: str) -> None:
+        self.check_id = check_id
+        self.problem = problem
+        super().__init__(
+            f"Check '{check_id}': could not forward process output: {problem}"
+        )

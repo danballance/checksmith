@@ -13,6 +13,8 @@ from typing import IO, Final, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from checksmith.errors import ProcessOutputError
+
 logger = logging.getLogger(__name__)
 
 POLL_INTERVAL_SECONDS: Final = 0.05
@@ -38,28 +40,33 @@ type _OutputEvent = _OutputChunk | _ReadError
 class _CapturedStream(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    decoder: IncrementalNewlineDecoder
+    decoder: codecs.IncrementalDecoder
+    newline_decoder: IncrementalNewlineDecoder
     fragments: list[str]
     byte_count: int
     closed: bool
 
-    def consume(self, data: bytes) -> str:
+    def consume(self, data: bytes) -> tuple[str, str]:
         self.byte_count += len(data)
         self.closed = not data
-        text = self.decoder.decode(data, final=self.closed)
-        self.fragments.append(text)
-        return text
+        raw = self.decoder.decode(data, final=self.closed)
+        normalized = self.newline_decoder.decode(raw, final=self.closed)
+        self.fragments.append(normalized)
+        return raw, normalized
 
     @classmethod
     def create(cls) -> _CapturedStream:
         return cls(
-            decoder=IncrementalNewlineDecoder(
-                codecs.getincrementaldecoder("utf-8")("strict"), translate=True
-            ),
+            decoder=codecs.getincrementaldecoder("utf-8")("strict"),
+            newline_decoder=IncrementalNewlineDecoder(None, translate=True),
             fragments=[],
             byte_count=0,
             closed=False,
         )
+
+
+class ProcessOutput(Protocol):
+    def write(self, text: str) -> None: ...
 
 
 class ProcessExecutor(Protocol):
@@ -70,6 +77,7 @@ class ProcessExecutor(Protocol):
         argv: tuple[str, ...],
         cwd: Path,
         heartbeat_interval_seconds: float,
+        output: ProcessOutput | None,
     ) -> subprocess.CompletedProcess[str]: ...
 
 
@@ -141,6 +149,7 @@ class SubprocessExecutor:
         events: Queue[_OutputEvent],
         started_at: float,
         heartbeat_interval_seconds: float,
+        output: ProcessOutput | None,
     ) -> subprocess.CompletedProcess[str]:
         stdout = _CapturedStream.create()
         stderr = _CapturedStream.create()
@@ -196,7 +205,14 @@ class SubprocessExecutor:
             if event.data:
                 last_output_at = self._runtime.monotonic()
             capture = stdout if event.stream == "stdout" else stderr
-            text = capture.consume(event.data)
+            raw, text = capture.consume(event.data)
+            if output is not None and raw:
+                try:
+                    output.write(raw)
+                except Exception as error:
+                    raise ProcessOutputError(
+                        check_id=check_id, problem=str(error)
+                    ) from error
             if logger.isEnabledFor(logging.DEBUG):
                 for line in text.splitlines():
                     logger.debug(
@@ -210,6 +226,7 @@ class SubprocessExecutor:
         argv: tuple[str, ...],
         cwd: Path,
         heartbeat_interval_seconds: float,
+        output: ProcessOutput | None,
     ) -> subprocess.CompletedProcess[str]:
         if (
             not math.isfinite(heartbeat_interval_seconds)
@@ -257,6 +274,7 @@ class SubprocessExecutor:
                 events=events,
                 started_at=started_at,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
+                output=output,
             )
         except BaseException:
             process.kill()

@@ -11,6 +11,7 @@ from threading import enumerate as running_threads
 import pytest
 
 from checksmith import processes
+from checksmith.errors import ProcessOutputError
 from checksmith.processes import (
     LocalProcessRuntime,
     ProcessRuntime,
@@ -18,6 +19,14 @@ from checksmith.processes import (
     SubprocessExecutor,
     _CapturedStream,
 )
+
+
+class ObservedOutput:
+    def __init__(self, callback: Callable[[str], None]) -> None:
+        self.callback = callback
+
+    def write(self, text: str) -> None:
+        self.callback(text)
 
 
 class LogObserver(logging.Handler):
@@ -90,6 +99,11 @@ class WatchedRuntime(DelegatingRuntime):
         )
 
 
+class SingleByteReadRuntime(DelegatingRuntime):
+    def read(self, *, fd: int, size: int) -> bytes:
+        return super().read(fd=fd, size=1)
+
+
 class ReadFailingRuntime(DelegatingRuntime):
     def __init__(self, runtime: ProcessRuntime, error: OSError) -> None:
         super().__init__(runtime)
@@ -153,6 +167,7 @@ def test_process_preserves_arguments_cwd_stdin_and_complete_output(
         argv=argv,
         cwd=tmp_path,
         heartbeat_interval_seconds=10.0,
+        output=None,
     )
 
     assert result.args == argv
@@ -206,6 +221,7 @@ def test_output_without_a_newline_is_logged_before_the_process_can_exit(
             argv=(sys.executable, "-c", source),
             cwd=tmp_path,
             heartbeat_interval_seconds=10.0,
+            output=None,
         )
 
     assert release.exists()
@@ -256,6 +272,7 @@ def test_heartbeats_report_activity_until_the_process_finishes(
             argv=(sys.executable, "-c", source),
             cwd=tmp_path,
             heartbeat_interval_seconds=0.05,
+            output=None,
         )
 
     assert result.returncode == 0
@@ -284,25 +301,33 @@ def test_both_output_pipes_are_drained_beyond_their_capacity(
         "    os.write(1, b'o' * 32768)\n"
     )
 
+    forwarded: list[str] = []
+
     result = executor.run(
         check_id="large",
         argv=(sys.executable, "-c", source),
         cwd=tmp_path,
         heartbeat_interval_seconds=10.0,
+        output=ObservedOutput(forwarded.append),
     )
 
     assert result.returncode == 0
     assert result.stdout == "o" * 1048576
     assert result.stderr == "e" * 1048576
 
+    combined = "".join(forwarded)
+    assert combined.count("o") == 1048576
+    assert combined.count("e") == 1048576
+
 
 def test_chunk_boundaries_preserve_utf8_and_normalize_newlines() -> None:
     capture = _CapturedStream.create()
     chunks = (b"\xe2", b"\x82", b"\xac\r", b"\nline\r", b"tail", b"")
 
-    text = "".join(capture.consume(chunk) for chunk in chunks)
+    text = "".join(capture.consume(chunk)[0] for chunk in chunks)
 
-    assert text == "€\nline\ntail"
+    assert text == "€\r\nline\rtail"
+    assert "".join(capture.fragments) == "€\nline\ntail"
     assert capture.byte_count == len(b"".join(chunks))
     assert capture.closed
 
@@ -329,6 +354,7 @@ def test_invalid_utf8_fails_immediately_and_reaps_the_child(
             argv=(sys.executable, "-c", source),
             cwd=tmp_path,
             heartbeat_interval_seconds=10.0,
+            output=None,
         )
 
     assert children[0].returncode is not None
@@ -350,6 +376,7 @@ def test_reader_errors_propagate_and_reap_the_child(
             argv=(sys.executable, "-c", "import time; time.sleep(30)"),
             cwd=tmp_path,
             heartbeat_interval_seconds=10.0,
+            output=None,
         )
 
     assert raised.value is failure
@@ -374,6 +401,7 @@ def test_interruption_reaps_the_child_and_closes_its_pipes(
             argv=(sys.executable, "-c", "import time; time.sleep(30)"),
             cwd=tmp_path,
             heartbeat_interval_seconds=0.05,
+            output=None,
         )
 
     assert children[0].returncode is not None
@@ -422,6 +450,7 @@ def test_inherited_pipes_are_reported_as_output_collection_and_can_be_cancelled(
                     argv=(sys.executable, "-c", source),
                     cwd=tmp_path,
                     heartbeat_interval_seconds=0.05,
+                    output=None,
                 )
         else:
             result = executor.run(
@@ -429,6 +458,7 @@ def test_inherited_pipes_are_reported_as_output_collection_and_can_be_cancelled(
                 argv=(sys.executable, "-c", source),
                 cwd=tmp_path,
                 heartbeat_interval_seconds=0.05,
+                output=None,
             )
             assert result.returncode == 0
             assert result.stdout == "parent finished\n"
@@ -457,6 +487,7 @@ def test_pipe_setup_failure_stops_already_started_readers(
             argv=(sys.executable, "-c", "import time; time.sleep(30)"),
             cwd=tmp_path,
             heartbeat_interval_seconds=10.0,
+            output=None,
         )
 
     assert children[0].returncode is not None
@@ -476,6 +507,7 @@ def test_failed_start_does_not_claim_a_process_started(
             argv=(str(tmp_path / "missing-program"),),
             cwd=tmp_path,
             heartbeat_interval_seconds=10.0,
+            output=None,
         )
 
     assert children == []
@@ -495,6 +527,7 @@ def test_invalid_reporting_intervals_fail_before_starting(
             argv=(sys.executable, "-c", "pass"),
             cwd=tmp_path,
             heartbeat_interval_seconds=interval,
+            output=None,
         )
 
     assert children == []
@@ -510,12 +543,14 @@ def test_executor_reuse_keeps_output_and_reader_state_per_invocation(
         argv=(sys.executable, "-c", "import sys; print('first'); sys.exit(3)"),
         cwd=tmp_path,
         heartbeat_interval_seconds=10.0,
+        output=None,
     )
     second = executor.run(
         check_id="reused",
         argv=(sys.executable, "-c", "import sys; print('second', file=sys.stderr)"),
         cwd=tmp_path,
         heartbeat_interval_seconds=10.0,
+        output=None,
     )
 
     assert first.returncode == 3
@@ -527,3 +562,175 @@ def test_executor_reuse_keeps_output_and_reader_state_per_invocation(
     assert len(children) == 2
     assert all(child.stdout is not None and child.stdout.closed for child in children)
     assert all(child.stderr is not None and child.stderr.closed for child in children)
+
+
+@pytest.mark.parametrize("fd", [1, 2])
+def test_output_is_forwarded_before_the_process_can_exit(
+    tmp_path: Path,
+    executor: SubprocessExecutor,
+    children: list[subprocess.Popen[bytes]],
+    caplog: pytest.LogCaptureFixture,
+    fd: int,
+) -> None:
+    caplog.set_level(logging.INFO, logger="checksmith.processes")
+    release = tmp_path / "release"
+    forwarded: list[str] = []
+    source = (
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"os.write({fd}, b'waiting for acknowledgement')\n"
+        "while not Path('release').exists(): time.sleep(0.01)\n"
+        f"os.write({3 - fd}, b'complete')\n"
+    )
+
+    def acknowledge(text: str) -> None:
+        forwarded.append(text)
+        assert current_thread().name == "MainThread"
+        if "".join(forwarded) == "waiting for acknowledgement":
+            assert children[0].poll() is None
+            release.touch()
+
+    result = executor.run(
+        check_id="forwarded",
+        argv=(sys.executable, "-c", source),
+        cwd=tmp_path,
+        heartbeat_interval_seconds=10.0,
+        output=ObservedOutput(acknowledge),
+    )
+
+    assert release.exists()
+    assert result.returncode == 0
+    assert "".join(forwarded) == "waiting for acknowledgementcomplete"
+    assert result.stdout == ("waiting for acknowledgement" if fd == 1 else "complete")
+    assert result.stderr == ("waiting for acknowledgement" if fd == 2 else "complete")
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("fd", [1, 2])
+def test_forwarding_preserves_split_utf8_ansi_and_immediate_carriage_returns(
+    tmp_path: Path,
+    runtime: WatchedRuntime,
+    children: list[subprocess.Popen[bytes]],
+    fd: int,
+) -> None:
+    executor = SubprocessExecutor(SingleByteReadRuntime(runtime))
+    forwarded: list[str] = []
+    release = tmp_path / "release"
+    source = (
+        "import os, time\n"
+        "from pathlib import Path\n"
+        f"os.write({fd}, '€\\r'.encode())\n"
+        "while not Path('release').exists(): time.sleep(0.01)\n"
+        f"os.write({fd}, b'\\n\\x1b[32mcomplete\\x1b[0m\\rtail')\n"
+    )
+
+    def acknowledge(text: str) -> None:
+        forwarded.append(text)
+        if "".join(forwarded) == "€\r":
+            assert children[0].poll() is None
+            release.touch()
+
+    result = executor.run(
+        check_id="raw",
+        argv=(sys.executable, "-c", source),
+        cwd=tmp_path,
+        heartbeat_interval_seconds=10.0,
+        output=ObservedOutput(acknowledge),
+    )
+
+    assert release.exists()
+    assert result.returncode == 0
+    assert "".join(forwarded) == "€\r\n\x1b[32mcomplete\x1b[0m\rtail"
+    assert all(len(text) == 1 for text in forwarded)
+    capture = result.stdout if fd == 1 else result.stderr
+    assert capture == "€\n\x1b[32mcomplete\x1b[0m\ntail"
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        BrokenPipeError("destination closed"),
+        UnicodeEncodeError("ascii", "€", 0, 1, "unsupported character"),
+        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte"),
+        ValueError("destination closed"),
+    ],
+)
+def test_forwarding_failure_aborts_and_reaps_the_child(
+    tmp_path: Path,
+    executor: SubprocessExecutor,
+    children: list[subprocess.Popen[bytes]],
+    failure: Exception,
+) -> None:
+    def fail(text: str) -> None:
+        raise failure
+
+    with pytest.raises(ProcessOutputError) as raised:
+        executor.run(
+            check_id="forwarding-failed",
+            argv=(
+                sys.executable,
+                "-c",
+                "import os, time; os.write(1, b'hi'); time.sleep(30)",
+            ),
+            cwd=tmp_path,
+            heartbeat_interval_seconds=10.0,
+            output=ObservedOutput(fail),
+        )
+
+    assert raised.value.__cause__ is failure
+    assert raised.value.check_id == "forwarding-failed"
+    assert raised.value.problem == str(failure)
+    assert "could not forward process output" in str(raised.value)
+    assert children[0].returncode is not None
+    assert children[0].stdout is not None and children[0].stdout.closed
+    assert children[0].stderr is not None and children[0].stderr.closed
+
+
+def test_forwarding_interruption_reaps_the_child(
+    tmp_path: Path,
+    executor: SubprocessExecutor,
+    children: list[subprocess.Popen[bytes]],
+) -> None:
+    def interrupt(text: str) -> None:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        executor.run(
+            check_id="forwarding-interrupted",
+            argv=(
+                sys.executable,
+                "-c",
+                "import os, time; os.write(1, b'hi'); time.sleep(30)",
+            ),
+            cwd=tmp_path,
+            heartbeat_interval_seconds=10.0,
+            output=ObservedOutput(interrupt),
+        )
+
+    assert children[0].returncode is not None
+    assert children[0].stdout is not None and children[0].stdout.closed
+    assert children[0].stderr is not None and children[0].stderr.closed
+
+
+def test_output_sink_is_not_reused_by_a_later_invocation(
+    tmp_path: Path,
+    executor: SubprocessExecutor,
+) -> None:
+    forwarded: list[str] = []
+    executor.run(
+        check_id="forwarding-enabled",
+        argv=(sys.executable, "-c", "print('first')"),
+        cwd=tmp_path,
+        heartbeat_interval_seconds=10.0,
+        output=ObservedOutput(forwarded.append),
+    )
+    result = executor.run(
+        check_id="forwarding-disabled",
+        argv=(sys.executable, "-c", "print('second')"),
+        cwd=tmp_path,
+        heartbeat_interval_seconds=10.0,
+        output=None,
+    )
+
+    assert "".join(forwarded) == "first\n"
+    assert result.stdout == "second\n"

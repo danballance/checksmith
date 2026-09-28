@@ -2,6 +2,7 @@
 
 import logging
 import shlex
+import subprocess
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from checksmith.errors import (
     CheckOutputError,
 )
 from checksmith.prerequisites import UvPrerequisites
-from checksmith.processes import ProcessExecutor
+from checksmith.processes import ProcessExecutor, ProcessOutput
 
 logger = logging.getLogger(__name__)
 
@@ -44,28 +45,19 @@ class Command(ABC):
     def check_is_runnable(self, *, check: Check, project_root: Path) -> bool:
         return True
 
-    def run(self, *, check: Check, project_root: Path) -> CheckResult:
-        """Run one check's process and convert what it returned.
+    @abstractmethod
+    def run(
+        self, *, check: Check, project_root: Path, output: ProcessOutput | None
+    ) -> CheckResult: ...
 
-        The check is a parameter rather than state, which is what lets one
-        instance serve every check that names it. The project root comes
-        separately because it belongs to the config as a whole.
-
-        A vector and no shell, so the arguments a config file wrote reach the
-        program exactly as written --- a path containing a space needs no
-        escaping and gets none. ``stdin`` is closed rather than inherited: a
-        tool that stops to ask a question should fail, not hang a gate that
-        nobody is watching.
-        """
-        return self._run_argv(check=check, project_root=project_root, argv=check.argv)
-
-    def _run_argv(
+    def _execute_argv(
         self,
         *,
         check: Check,
         project_root: Path,
         argv: tuple[str, ...],
-    ) -> CheckResult:
+        output: ProcessOutput | None,
+    ) -> subprocess.CompletedProcess[str]:
         if check.package_type is PackageType.UV:
             self._uv_prerequisites.validate(check=check, project_root=project_root)
         logger.debug("%s argv=%s cwd=%s", check.id, argv, project_root)
@@ -76,6 +68,7 @@ class Command(ABC):
                 argv=argv,
                 cwd=project_root,
                 heartbeat_interval_seconds=10.0,
+                output=output,
             )
         except OSError as error:
             raise CheckExecutionError(

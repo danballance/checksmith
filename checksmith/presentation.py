@@ -12,9 +12,29 @@ class OutputFormat(StrEnum):
     JSON = "json"
 
 
+class ConsoleProcessOutput:
+    def __init__(self, console: Console) -> None:
+        self._console = console
+        self._partial_line = False
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        self._console.file.write(text)
+        self._console.file.flush()
+        self._partial_line = not text.endswith("\n")
+
+    def finish(self) -> None:
+        if self._partial_line:
+            self.write("\n")
+
+
 class OutputPresenter:
     def __init__(self, console: Console) -> None:
         self._console = console
+
+    def process_output(self) -> ConsoleProcessOutput:
+        return ConsoleProcessOutput(console=self._console)
 
     def emit(self, output: CliOutput, fmt: OutputFormat) -> NoReturn:
         if fmt is OutputFormat.JSON:

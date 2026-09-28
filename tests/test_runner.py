@@ -21,7 +21,9 @@ from checksmith.errors import (
     CheckExecutionError,
     CheckOutputError,
     CheckPrerequisiteError,
+    ProcessOutputError,
 )
+from checksmith.processes import ProcessOutput
 from checksmith.runner import Runner
 from tests.conftest import FakeProcesses, make_command_factory
 
@@ -63,7 +65,9 @@ class RecordingCommand(Command):
     def name(self) -> CommandName:
         return CommandName.RUFF
 
-    def run(self, *, check: Check, project_root: Path) -> CheckResult:
+    def run(
+        self, *, check: Check, project_root: Path, output: ProcessOutput | None
+    ) -> CheckResult:
         self.runs.append(check.id)
         self.roots.append(project_root)
         result = self.results[check.id]
@@ -101,9 +105,11 @@ class EligibilityCommand(RecordingCommand):
             raise result
         return result
 
-    def run(self, *, check: Check, project_root: Path) -> CheckResult:
+    def run(
+        self, *, check: Check, project_root: Path, output: ProcessOutput | None
+    ) -> CheckResult:
         self.calls.append(("run", check, project_root))
-        return super().run(check=check, project_root=project_root)
+        return super().run(check=check, project_root=project_root, output=output)
 
 
 class ReportProcesses(FakeProcesses):
@@ -114,6 +120,7 @@ class ReportProcesses(FakeProcesses):
         argv: tuple[str, ...],
         cwd: Path,
         heartbeat_interval_seconds: float,
+        output: ProcessOutput | None,
     ) -> subprocess.CompletedProcess[str]:
         reports = {
             "ruff": "[]",
@@ -126,6 +133,7 @@ class ReportProcesses(FakeProcesses):
             argv=argv,
             cwd=cwd,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
+            output=output,
         )
 
 
@@ -177,7 +185,7 @@ def test_every_check_is_run_once_and_every_result_is_kept(
         checks=checks,
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert tuple(result.check_id for result in output.results) == ("lint", "format")
     assert recorder.runs == ["lint", "format"]
@@ -203,7 +211,7 @@ def test_two_checks_naming_one_command_share_the_single_handler(
         checks=checks,
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert len(recorder.runs) == len(checks)
 
@@ -227,7 +235,7 @@ def test_every_check_runs_in_the_one_project_root(
         checks=checks,
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert recorder.roots == [PROJECT_ROOT, PROJECT_ROOT]
 
@@ -241,7 +249,7 @@ def test_unreadable_tool_reports_are_collected_for_every_check(
         checks=checks,
         commands=command_factory.registry(),
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert len(processes.started) == 2
     assert tuple(result.check_id for result in output.results) == ("lint", "format")
@@ -264,7 +272,7 @@ def test_a_whole_suite_runs_through_the_commands_checksmith_ships(
         checks=checks,
         commands=command_factory.registry(),
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert len(processes.started) == 2
     assert output.results == (
@@ -283,7 +291,7 @@ def test_a_run_with_no_checks_at_all_is_rejected(
             checks=(),
             commands=command_factory.registry(),
             project_root=PROJECT_ROOT,
-        ).check()
+        ).check(output=None)
 
 
 def test_a_mixed_suite_uses_each_commands_report_format() -> None:
@@ -311,7 +319,7 @@ def test_a_mixed_suite_uses_each_commands_report_format() -> None:
         checks=checks,
         commands=command_factory.registry(),
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert tuple(process.argv[3] for process in processes.started) == (
         "ruff",
@@ -369,7 +377,7 @@ def test_a_tool_error_preserves_prior_results_and_runs_later_checks(
         checks=tuple(ruff_check(check_id=check_id) for check_id in check_ids),
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert recorder.runs == list(check_ids)
     assert output.results == (
@@ -392,25 +400,34 @@ def test_a_tool_error_preserves_prior_results_and_runs_later_checks(
     )
 
 
-def test_unexpected_command_bugs_are_not_reported_as_tool_results(
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("adapter bug"),
+        ProcessOutputError(check_id="lint", problem="output stream closed"),
+    ],
+)
+def test_unexpected_errors_abort_without_running_later_checks(
     checks: tuple[Check, ...],
+    error: Exception,
 ) -> None:
     recorder = RecordingCommand(
         results={
-            "lint": RuntimeError("adapter bug"),
+            "lint": error,
             "format": CheckResult(
                 check_id="format", status=CheckStatus.PASSED, messages=()
             ),
         }
     )
 
-    with pytest.raises(RuntimeError, match="adapter bug"):
+    with pytest.raises(type(error)) as raised:
         Runner(
             checks=checks,
             commands={CommandName.RUFF: recorder},
             project_root=PROJECT_ROOT,
-        ).check()
+        ).check(output=None)
 
+    assert raised.value is error
     assert recorder.runs == ["lint"]
 
 
@@ -431,7 +448,7 @@ def test_eligibility_is_checked_once_per_check_immediately_before_execution() ->
         checks=(before, skipped, after),
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert recorder.calls == [
         ("eligibility", before, PROJECT_ROOT),
@@ -467,7 +484,7 @@ def test_non_runnable_checks_never_start_a_command(
         checks=checks,
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert recorder.runs == []
     assert recorder.calls == [("eligibility", check, PROJECT_ROOT) for check in checks]
@@ -502,7 +519,7 @@ def test_a_prerequisite_error_preserves_results_and_runs_later_checks() -> None:
         checks=(before, broken, after),
         commands={CommandName.RUFF: recorder},
         project_root=PROJECT_ROOT,
-    ).check()
+    ).check(output=None)
 
     assert recorder.calls == [
         ("eligibility", before, PROJECT_ROOT),
@@ -534,7 +551,7 @@ def test_an_unexpected_eligibility_bug_propagates_without_starting_the_check(
             checks=checks,
             commands={CommandName.RUFF: recorder},
             project_root=PROJECT_ROOT,
-        ).check()
+        ).check(output=None)
 
     assert recorder.calls == [("eligibility", checks[0], PROJECT_ROOT)]
     assert recorder.runs == []
