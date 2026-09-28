@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any, Final
 
 import typer
+from pydantic import BaseModel, ConfigDict
 from rich.console import Console
 from rich.logging import RichHandler
 from typer.core import TyperGroup
@@ -95,6 +96,12 @@ DebugOption = Annotated[
 ]
 
 
+class InvocationSettings(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    debug: bool
+
+
 class ChecksmithGroup(TyperGroup):
     """The root group: takes the debug switch anywhere, and owns the error boundary."""
 
@@ -171,6 +178,7 @@ class CliApplication:
 
     def main(
         self,
+        ctx: typer.Context,
         version: Annotated[
             bool,
             typer.Option(
@@ -183,6 +191,7 @@ class CliApplication:
         debug: DebugOption = False,
     ) -> None:
         """Manage coding-agent integrations and enforce project checks."""
+        ctx.obj = InvocationSettings(debug=debug)
         self._logging.configure(debug=debug)
 
     def agents_install(self) -> None:
@@ -232,19 +241,28 @@ class CliApplication:
 
     def check(
         self,
+        ctx: typer.Context,
         config_file: ConfigOption,
         fmt: FormatOption = OutputFormat.TEXT,
         check_id: CheckOption = None,
     ) -> None:
         """Execute the project's configured checks and report their results."""
-        self._presenter.emit(
-            self._checks.check(
-                config_file=config_file,
-                working_directory=Path.cwd(),
-                check_id=check_id,
-            ),
-            fmt,
+        settings = ctx.find_object(InvocationSettings)
+        assert settings is not None
+        output = (
+            self._presenter.process_output()
+            if fmt is OutputFormat.TEXT and not settings.debug
+            else None
         )
+        result = self._checks.check(
+            config_file=config_file,
+            working_directory=Path.cwd(),
+            check_id=check_id,
+            output=output,
+        )
+        if output is not None:
+            output.finish()
+        self._presenter.emit(result, fmt)
 
 
 app = CliApplication(

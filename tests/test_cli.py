@@ -31,6 +31,7 @@ from checksmith.cli import (
     app as production_app,
 )
 from checksmith.commands.command import Command
+from checksmith.commands.pytest import PytestFailure, PytestSummary
 from checksmith.commands.registry import CommandFactory
 from checksmith.config import Check
 from checksmith.configuration_loading import ConfigLoader, LocalYamlConfigSource
@@ -50,8 +51,12 @@ from checksmith.initialization import (
 )
 from checksmith.logs import LOGGER_NAME, LoggingConfigurator
 from checksmith.outputs.checkoutput import CheckOutput
-from checksmith.presentation import OutputPresenter
-from checksmith.processes import LocalProcessRuntime, SubprocessExecutor
+from checksmith.presentation import ConsoleProcessOutput, OutputPresenter
+from checksmith.processes import (
+    LocalProcessRuntime,
+    ProcessOutput,
+    SubprocessExecutor,
+)
 from tests.commands.test_pyarchgraph import (
     HEALTHY_REPORT,
     custom_report_json,
@@ -516,7 +521,7 @@ def test_check_requires_a_config_to_be_named(
     ("prefix", "suffix"),
     [((), ()), (("--debug",), ()), (("-d",), ()), ((), ("--debug",)), ((), ("-d",))],
 )
-def test_process_debug_output_stays_on_stderr(
+def test_process_output_follows_text_debug_and_json_modes(
     cli_runner: CliRunner,
     config_file: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -563,7 +568,9 @@ def test_process_debug_output_stays_on_stderr(
     else:
         assert result.stderr == ""
     assert "stdout: []" not in result.stdout
-    assert "tool progress" not in result.stdout
+    live = fmt is OutputFormat.TEXT and not (prefix or suffix)
+    assert ("tool progress" in result.stdout) is live
+    assert ("[]" in result.stdout.splitlines()) is live
     assert "DEBUG" not in result.stdout
     if fmt is OutputFormat.JSON:
         output = CheckOutput.model_validate_json(result.stdout)
@@ -572,6 +579,85 @@ def test_process_debug_output_stays_on_stderr(
         )
     else:
         assert "PASS" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "modes",
+    [
+        (("--debug",), (), ("--format", "json"), ()),
+        ((), ("--format", "json", "--debug"), (), ("--debug",)),
+    ],
+)
+def test_repeated_invocations_do_not_leak_debug_or_streaming_state(
+    cli_runner: CliRunner,
+    config_file: Path,
+    modes: tuple[tuple[str, ...], ...],
+) -> None:
+    source = "import sys; print('[]'); sys.stderr.write('tool progress\\n')"
+    app = make_app(
+        commands=make_command_factory(executor=PythonProcessExecutor(source))
+    )
+
+    for mode in modes:
+        result = cli_runner.invoke(app, ["check", "--config", str(config_file), *mode])
+
+        assert result.exit_code == ExitCode.SUCCESS
+        debug = "--debug" in mode
+        structured = "json" in mode
+        assert ("tool progress" in result.stdout) is (not debug and not structured)
+        assert ("tool progress" in result.stderr) is debug
+        if structured:
+            assert CheckOutput.model_validate_json(result.stdout).exit_code == 0
+        else:
+            assert "PASS" in result.stdout
+
+
+def test_live_output_preserves_carriage_returns_escapes_and_partial_lines(
+    cli_runner: CliRunner,
+    config_file: Path,
+) -> None:
+    source = (
+        "import sys; print('[]', flush=True); "
+        "sys.stderr.write('[bold]progress\\r\\x1b[31mdone\\x1b[0m')"
+    )
+    app = make_app(
+        commands=make_command_factory(executor=PythonProcessExecutor(source))
+    )
+
+    result = cli_runner.invoke(app, ["check", "--config", str(config_file)])
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert b"[bold]progress\r\x1b[31mdone\x1b[0m" in result.stdout_bytes
+    report = result.stdout_bytes.index(b"Checksmith")
+    assert (
+        b"\n"
+        in result.stdout_bytes[
+            result.stdout_bytes.index(b"\x1b[0m") + len(b"\x1b[0m") : report
+        ]
+    )
+    assert "PASS" in result.stdout
+
+
+def test_live_output_write_failure_reaches_the_cli_error_boundary(
+    cli_runner: CliRunner,
+    config_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_write(self: ConsoleProcessOutput, text: str) -> None:
+        raise OSError("output stream closed")
+
+    app = make_app(
+        commands=make_command_factory(executor=PythonProcessExecutor("print('[]')"))
+    )
+    monkeypatch.setattr(ConsoleProcessOutput, "write", fail_write)
+
+    result = cli_runner.invoke(app, ["check", "--config", str(config_file)])
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stdout == ""
+    assert "could not forward process output: output stream closed" in result.stderr
+    assert "Checksmith" not in result.stdout
 
 
 def test_check_loads_the_named_config_and_runs_what_it_declares(
@@ -946,7 +1032,7 @@ def pytest_project_root(pytest_config_file: Path) -> Path:
         (12, "ImportError while collecting tests\n", CheckStatus.ERROR, ExitCode.ERROR),
     ],
 )
-def test_cli_reports_project_pytest_results_and_native_diagnostics(
+def test_cli_reports_pytest_summaries_and_preserves_error_diagnostics(
     app: typer.Typer,
     cli_runner: CliRunner,
     pytest_config_file: Path,
@@ -959,8 +1045,28 @@ def test_cli_reports_project_pytest_results_and_native_diagnostics(
     expected_exit_code: ExitCode,
 ) -> None:
     processes.exit_code = tool_exit_code
-    processes.stdout = stdout
+    processes.stdout = "progress lines and captured test output\n" + stdout
     processes.stderr = "Additional pytest diagnostic\n"
+    processes.pytest_report = PytestSummary(
+        outcomes={"failed": 1} if tool_exit_code == 11 else {"passed": 1},
+        duration_seconds=0.12,
+        warnings=int(tool_exit_code == 16),
+        deselected=0,
+        failures=(
+            PytestFailure(
+                nodeid="tests/test_app.py::test_app",
+                phase="call",
+                reason="AssertionError",
+            ),
+        )
+        if tool_exit_code == 11
+        else (),
+        coverage=None,
+    )
+    if tool_exit_code == 15:
+        processes.pytest_report = processes.pytest_report.model_copy(
+            update={"outcomes": {}}
+        )
 
     result = cli_runner.invoke(
         app,
@@ -988,8 +1094,17 @@ def test_cli_reports_project_pytest_results_and_native_diagnostics(
         assert label in result.stdout
         assert "unit-tests" in result.stdout
         output = result.stdout
-    assert stdout.strip() in output
-    assert processes.stderr.strip() in output
+    if expected_status is CheckStatus.ERROR:
+        assert stdout.strip() in output
+        assert processes.stderr.strip() in output
+    else:
+        assert "progress lines and captured test output" not in output
+        assert processes.stderr.strip() not in output
+        assert processes.pytest_report.messages()[0] in output
+        if tool_exit_code == 11:
+            assert "FAILED tests/test_app.py::test_app: AssertionError" in output
+        if tool_exit_code == 15:
+            assert "No tests were collected; the check passes." in output
 
 
 def test_cli_runs_pytest_from_the_configured_root_when_invoked_elsewhere(
