@@ -54,7 +54,10 @@ def test_source_locations_have_strict_one_based_positions(json_value: str) -> No
 
 def test_clean_report_round_trips_and_exits_zero() -> None:
     assert CLEAN_REPORT.exit_code == 0
-    assert AnalysisReport.model_validate_json(CLEAN_REPORT.model_dump_json()) == CLEAN_REPORT
+    assert (
+        AnalysisReport.model_validate_json(CLEAN_REPORT.model_dump_json())
+        == CLEAN_REPORT
+    )
 
 
 def test_findings_exit_one_and_errors_take_precedence() -> None:
@@ -83,7 +86,9 @@ def test_findings_exit_one_and_errors_take_precedence() -> None:
         modules=("app.py",),
         plugins=(plugin,),
         errors=(
-            AnalysisError(message="Other plugin failed.", path=None, line=None, column=None),
+            AnalysisError(
+                message="Other plugin failed.", path=None, line=None, column=None
+            ),
         ),
     )
 

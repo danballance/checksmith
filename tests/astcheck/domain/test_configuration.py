@@ -52,7 +52,9 @@ def test_configuration_preserves_explicit_plugin_settings() -> None:
         ),
     ],
 )
-def test_invalid_configuration_values_are_rejected(field: str, value: JsonValue) -> None:
+def test_invalid_configuration_values_are_rejected(
+    field: str, value: JsonValue
+) -> None:
     document = {**VALID_CONFIGURATION, field: value}
 
     with pytest.raises(ValidationError):
@@ -61,7 +63,9 @@ def test_invalid_configuration_values_are_rejected(field: str, value: JsonValue)
 
 @pytest.mark.parametrize("field", list(VALID_CONFIGURATION))
 def test_configuration_requires_every_field_explicitly(field: str) -> None:
-    document = {key: value for key, value in VALID_CONFIGURATION.items() if key != field}
+    document = {
+        key: value for key, value in VALID_CONFIGURATION.items() if key != field
+    }
 
     with pytest.raises(ValidationError, match="Field required"):
         AnalysisConfiguration.model_validate(document)

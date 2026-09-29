@@ -13,14 +13,15 @@ dependencies = [
 ]
 
 [project.scripts]
-checksmith = "checksmith.cli:app"
-astcheck = "astcheck.cli:app"
+checksmith = "checksmith.main:app"
+astcheck = "astcheck.main:app"
 
 [project.entry-points."astcheck.plugins"]
-oopcheck = "astcheck.plugins.oopcheck.plugin:OopcheckPlugin"
+oopcheck = "astcheck.adapters.driven.plugins.oopcheck:OopcheckPlugin"
 
 [dependency-groups]
 dev = [
+    "import-linter>=2.15",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.16.7",
@@ -38,3 +39,56 @@ artifacts = ["checksmith/assets/**/*"]
 
 [tool.hatch.build.targets.sdist]
 artifacts = ["checksmith/assets/**/*"]
+
+[tool.importlinter]
+root_packages = ["checksmith", "astcheck"]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+id = "hexagonal-layers"
+name = "Dependencies point inward through the shared hexagonal layout"
+type = "layers"
+containers = ["checksmith", "astcheck"]
+layers = ["main", "adapters", "application", "domain"]
+exhaustive = true
+
+[[tool.importlinter.contracts]]
+id = "package-independence"
+name = "Checksmith and Astcheck communicate only through external contracts"
+type = "independence"
+modules = ["checksmith", "astcheck"]
+
+[[tool.importlinter.contracts]]
+id = "checksmith-adapters"
+name = "Checksmith adapter implementations are independent"
+type = "independence"
+modules = ["checksmith.adapters.driving.*", "checksmith.adapters.driven.*"]
+
+[[tool.importlinter.contracts]]
+id = "astcheck-adapters"
+name = "Astcheck adapter implementations are independent"
+type = "independence"
+modules = ["astcheck.adapters.driving.*", "astcheck.adapters.driven.*"]
+
+[[tool.importlinter.contracts]]
+id = "core-framework-independence"
+name = "Core layers do not depend on presentation or serialization frameworks"
+type = "forbidden"
+source_modules = ["checksmith.domain", "checksmith.application", "astcheck.domain", "astcheck.application"]
+forbidden_modules = ["typer", "rich", "click", "yaml", "subprocess", "importlib", "tempfile", "threading", "queue", "io", "sys", "stat"]
+
+[[tool.importlinter.contracts]]
+id = "composition-isolation"
+name = "Only composition roots assemble production dependencies"
+type = "forbidden"
+source_modules = ["checksmith", "checksmith.**", "astcheck", "astcheck.**"]
+forbidden_modules = ["checksmith.main", "astcheck.main"]
+as_packages = false
+
+[[tool.importlinter.contracts]]
+id = "application-ports"
+name = "Application ports are independent of use cases"
+type = "layers"
+containers = ["checksmith.application", "astcheck.application"]
+layers = ["use_cases", "ports"]
+exhaustive = true

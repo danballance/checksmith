@@ -11,13 +11,22 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from checksmith.commands.import_linter import ImportLinterPrerequisites
-from checksmith.commands.pytest import PackagedLauncherSource, PytestSummary
-from checksmith.commands.registry import CommandFactory
-from checksmith.logs import LOGGER_NAME
-from checksmith.packages import UvPackage
-from checksmith.prerequisites import LocalProjectFiles, UvProjectPrerequisites
-from checksmith.processes import ProcessExecutor, ProcessOutput
+from checksmith.adapters.driven.execution.import_linter import ImportLinterPrerequisites
+from checksmith.adapters.driven.execution.packages import UvInvocation
+from checksmith.adapters.driven.execution.prerequisites import (
+    LocalProjectFiles,
+    UvProjectPrerequisites,
+)
+from checksmith.adapters.driven.execution.processes import (
+    ProcessExecutor,
+    ProcessOutput,
+)
+from checksmith.adapters.driven.execution.pytest import (
+    PackagedLauncherSource,
+    PytestSummary,
+)
+from checksmith.adapters.driven.execution.registry import CommandFactory
+from checksmith.adapters.driving.cli.logs import LOGGER_NAME
 
 
 @pytest.fixture
@@ -190,9 +199,9 @@ def make_command_factory(executor: ProcessExecutor) -> CommandFactory:
         ),
         import_linter_prerequisites=ImportLinterPrerequisites(files=project_files),
         launcher_source=PackagedLauncherSource(
-            resource=files("checksmith.commands") / "_pytest_launcher.py"
+            resource=files("checksmith.adapters.driven.execution") / "_pytest_launcher.py"
         ),
-        pytest_package=UvPackage(),
+        pytest_package=UvInvocation(),
     )
 
 
