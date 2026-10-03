@@ -9,13 +9,17 @@ from checksmith.adapters.driven.execution.import_linter import (
     ImportLinterEligibility,
 )
 from checksmith.adapters.driven.execution.packages import PackageInvocation
-from checksmith.adapters.driven.execution.prerequisites import UvPrerequisites
+from checksmith.adapters.driven.execution.prerequisites import (
+    ProjectFiles,
+    UvPrerequisites,
+)
 from checksmith.adapters.driven.execution.processes import ProcessExecutor
 from checksmith.adapters.driven.execution.pyarchgraph import PyArchGraphCommand
 from checksmith.adapters.driven.execution.pytest import LauncherSource, PytestCommand
 from checksmith.adapters.driven.execution.ruff import RuffCommand
 from checksmith.adapters.driven.execution.semgrep import SemgrepCommand
 from checksmith.adapters.driven.execution.ty import TyCommand
+from checksmith.adapters.driven.execution.vulture import VultureCommand
 from checksmith.domain.models import CommandName
 
 
@@ -27,12 +31,14 @@ class CommandFactory:
         import_linter_prerequisites: ImportLinterEligibility,
         launcher_source: LauncherSource,
         pytest_package: PackageInvocation,
+        project_files: ProjectFiles,
     ) -> None:
         self._executor = executor
         self._uv_prerequisites = uv_prerequisites
         self._import_linter_prerequisites = import_linter_prerequisites
         self._launcher_source = launcher_source
         self._pytest_package = pytest_package
+        self._project_files = project_files
 
     @overload
     def for_name(self, *, name: Literal[CommandName.PYTEST]) -> PytestCommand: ...

@@ -68,3 +68,5 @@ class CommandName(StrEnum):
     PYARCHGRAPH = "pyarchgraph"
 
     PYTEST = "pytest"
+
+    VULTURE = "vulture"

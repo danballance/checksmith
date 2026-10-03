@@ -202,6 +202,7 @@ def make_command_factory(executor: ProcessExecutor) -> CommandFactory:
             resource=files("checksmith.adapters.driven.execution") / "_pytest_launcher.py"
         ),
         pytest_package=UvInvocation(),
+        project_files=project_files,
     )
 
 

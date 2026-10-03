@@ -51,6 +51,7 @@ app = CliApplication(
                 / "_pytest_launcher.py"
             ),
             pytest_package=UvInvocation(),
+            project_files=LocalProjectFiles(),
         ),
     ),
     initializer=Initializer(
