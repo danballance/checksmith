@@ -79,6 +79,7 @@ def test_importing_import_linter_does_not_load_other_command_implementations(
         "checksmith.adapters.driven.execution.ruff",
         "checksmith.adapters.driven.execution.semgrep",
         "checksmith.adapters.driven.execution.ty",
+        "checksmith.adapters.driven.execution.vulture",
         "importlinter",
     }
 

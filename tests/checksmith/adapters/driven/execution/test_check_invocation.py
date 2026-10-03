@@ -115,6 +115,27 @@ def test_a_ty_check_is_accepted_and_builds_a_uvx_vector() -> None:
     )
 
 
+def test_a_vulture_check_is_accepted_and_builds_a_uvx_vector() -> None:
+    configured = resolved(
+        id="dead-code",
+        package="vulture==2.16",
+        command="vulture",
+        args=["--config", {"config_path": "vulture.toml"}, "."],
+    )
+
+    assert configured.id == "dead-code"
+    assert configured.command is CommandName.VULTURE
+    assert build_check_argv(configured) == (
+        "uvx",
+        "--from",
+        "vulture==2.16",
+        "vulture",
+        "--config",
+        "/project/.checksmith/vulture.toml",
+        ".",
+    )
+
+
 def test_pyarchgraph_configuration_passes_roots_and_gate_unchanged() -> None:
     configured = resolved(
         command="pyarchgraph",

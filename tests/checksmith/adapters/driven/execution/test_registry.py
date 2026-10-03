@@ -15,6 +15,7 @@ from checksmith.adapters.driven.execution.registry import CommandFactory
 from checksmith.adapters.driven.execution.ruff import RuffCommand
 from checksmith.adapters.driven.execution.semgrep import SemgrepCommand
 from checksmith.adapters.driven.execution.ty import TyCommand
+from checksmith.adapters.driven.execution.vulture import VultureCommand
 from checksmith.domain.models import CheckStatus, CommandName
 from tests.checksmith.adapters.driven.execution.test_astcheck import CLEAN_REPORT
 from tests.checksmith.adapters.driven.execution.test_pyarchgraph import HEALTHY_REPORT
@@ -36,6 +37,7 @@ def test_importing_the_registry_loads_each_command_implementation(
         "checksmith.adapters.driven.execution.ruff",
         "checksmith.adapters.driven.execution.semgrep",
         "checksmith.adapters.driven.execution.ty",
+        "checksmith.adapters.driven.execution.vulture",
     } <= modules
 
 
@@ -50,6 +52,7 @@ def test_importing_the_registry_loads_each_command_implementation(
         (CommandName.TY, TyCommand),
         (CommandName.PYARCHGRAPH, PyArchGraphCommand),
         (CommandName.PYTEST, PytestCommand),
+        (CommandName.VULTURE, VultureCommand),
     ],
 )
 def test_the_configured_command_selects_the_class_that_handles_it(
@@ -96,6 +99,7 @@ def test_each_registered_command_answers_to_the_key_it_is_filed_under(
             0,
             HEALTHY_REPORT,
         ),
+        (CommandName.VULTURE, 0, ""),
     ],
 )
 def test_a_command_can_process_different_checks_without_retaining_check_state(

@@ -91,6 +91,7 @@ def test_composition_root_imports_the_command_factory_and_implementations(
         "checksmith.adapters.driven.execution.ruff",
         "checksmith.adapters.driven.execution.semgrep",
         "checksmith.adapters.driven.execution.ty",
+        "checksmith.adapters.driven.execution.vulture",
     } <= modules
 
 
@@ -291,6 +292,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
         "ruff.toml",
         "semgrep.yaml",
         "coverage.toml",
+        "vulture.toml",
         "astcheck.yaml",
     }
     assert all(
@@ -300,6 +302,7 @@ def test_init_prompts_with_the_current_directory_and_accepts_enter(
             "ruff.toml",
             "semgrep.yaml",
             "coverage.toml",
+            "vulture.toml",
             "astcheck.yaml",
         )
     )
@@ -1870,6 +1873,129 @@ def test_cli_preserves_ty_execution_failure_output(
     assert "Check 'types': ty exited 2" in message
     assert "Diagnostic details from stdout" in message
     assert "Could not read the project configuration" in message
+
+
+@pytest.fixture
+def vulture_config_file(tmp_path: Path) -> Path:
+    (tmp_path / "vulture.toml").write_text("[tool.vulture]\n", encoding="utf-8")
+    path = tmp_path / "checksmith.yaml"
+    path.write_text(
+        "schema_version: 1\n"
+        "project_root: .\n"
+        "checks:\n"
+        "  - id: dead-code\n"
+        "    package_type: uvx\n"
+        "    package: vulture==2.16\n"
+        "    command: vulture\n"
+        "    args: [--config, {config_path: vulture.toml}, .]\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_cli_reports_a_clean_vulture_check(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    vulture_config_file: Path,
+    processes: FakeProcesses,
+) -> None:
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(vulture_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.SUCCESS
+    assert result.stderr == ""
+    assert processes.started[0].cwd == vulture_config_file.parent
+    assert processes.started[0].argv == (
+        "uvx",
+        "--from",
+        "vulture==2.16",
+        "vulture",
+        "--config",
+        str(vulture_config_file.parent / "vulture.toml"),
+        ".",
+    )
+    assert json.loads(result.stdout) == {
+        "results": [{"check_id": "dead-code", "status": "passed", "messages": []}]
+    }
+
+
+def test_cli_reports_dead_code_as_unhealthy(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    vulture_config_file: Path,
+    processes: FakeProcesses,
+) -> None:
+    processes.exit_code = 3
+    processes.stdout = "src/app.py:3: unused function 'helper' (60% confidence)\n"
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(vulture_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.UNHEALTHY
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == {
+        "results": [
+            {
+                "check_id": "dead-code",
+                "status": "failed",
+                "messages": ["src/app.py:3 unused function 'helper' (60% confidence)"],
+            }
+        ]
+    }
+
+
+def test_cli_reports_a_missing_vulture_config_without_running_vulture(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    vulture_config_file: Path,
+    processes: FakeProcesses,
+) -> None:
+    (vulture_config_file.parent / "vulture.toml").unlink()
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(vulture_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    assert processes.started == []
+    results = json.loads(result.stdout)["results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "dead-code"
+    assert results[0]["status"] == "error"
+    message = results[0]["messages"][0]
+    assert str(vulture_config_file.parent / "vulture.toml") in message
+    assert "silently runs with its defaults" in message
+
+
+def test_cli_preserves_vulture_input_errors(
+    app: typer.Typer,
+    cli_runner: CliRunner,
+    vulture_config_file: Path,
+    processes: FakeProcesses,
+) -> None:
+    processes.exit_code = 1
+    processes.stderr = 'broken/bad.py:1: invalid syntax at "def broken(:"\n'
+
+    result = cli_runner.invoke(
+        app,
+        ["check", "--config", str(vulture_config_file), "--format", "json"],
+    )
+
+    assert result.exit_code == ExitCode.ERROR
+    assert result.stderr == ""
+    results = json.loads(result.stdout)["results"]
+    assert len(results) == 1
+    assert results[0]["check_id"] == "dead-code"
+    assert results[0]["status"] == "error"
+    message = results[0]["messages"][0]
+    assert "Check 'dead-code': vulture exited 1" in message
+    assert 'broken/bad.py:1: invalid syntax at "def broken(:"' in message
 
 
 @pytest.fixture

@@ -26,6 +26,7 @@ def test_importing_semgrep_does_not_load_other_command_implementations(
         "checksmith.adapters.driven.execution.import_linter",
         "checksmith.adapters.driven.execution.ruff",
         "checksmith.adapters.driven.execution.ty",
+        "checksmith.adapters.driven.execution.vulture",
     }
 
 

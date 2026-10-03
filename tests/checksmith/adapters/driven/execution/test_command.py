@@ -39,6 +39,7 @@ def test_importing_the_base_does_not_load_command_implementations(
         "checksmith.adapters.driven.execution.ruff",
         "checksmith.adapters.driven.execution.semgrep",
         "checksmith.adapters.driven.execution.ty",
+        "checksmith.adapters.driven.execution.vulture",
     }
 
 
@@ -280,6 +281,7 @@ def test_nothing_is_read_when_nothing_ran(
         (CommandName.SEMGREP, "semgrep==1.176.1", ()),
         (CommandName.IMPORT_LINTER, "import-linter==2.15", ()),
         (CommandName.TY, "ty==0.0.80", ()),
+        (CommandName.VULTURE, "vulture==2.16", ()),
     ],
 )
 def test_invalid_utf8_output_is_a_check_output_error(

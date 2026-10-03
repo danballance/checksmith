@@ -42,6 +42,7 @@ def test_importing_the_runner_does_not_load_command_implementations(
         "checksmith.adapters.driven.execution.ruff",
         "checksmith.adapters.driven.execution.semgrep",
         "checksmith.adapters.driven.execution.ty",
+        "checksmith.adapters.driven.execution.vulture",
     }
 
 
