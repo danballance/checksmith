@@ -1,5 +1,6 @@
 """Tests for the starter resources bundled with the package."""
 
+import tomllib
 from collections.abc import Iterator
 from importlib.resources import as_file, files
 from pathlib import Path
@@ -139,6 +140,43 @@ def test_the_starter_config_enforces_cognitive_complexity(
         "--report-ignored=false",
         ".",
     )
+
+
+def test_the_starter_config_finds_dead_code_using_the_bundled_vulture_config(
+    default_assets: Path,
+) -> None:
+    config = ConfigLoader(source=LocalYamlConfigSource()).load(
+        config_file=default_assets / "checksmith.yaml",
+        working_directory=default_assets,
+    )
+    dead_code = next(
+        check for check in config.checks if check.command is CommandName.VULTURE
+    )
+
+    assert dead_code.id == "vulture"
+    assert dead_code.package_type is PackageType.UVX
+    assert PackageInvocation.from_name(dead_code.package_type).build_argv(
+        package=dead_code.package,
+        command=dead_code.command.value,
+        arguments=dead_code.arguments,
+    ) == (
+        "uvx",
+        "--from",
+        "vulture==2.16",
+        "vulture",
+        "--config",
+        str(default_assets / "vulture.toml"),
+        ".",
+    )
+
+
+def test_the_bundled_vulture_config_keeps_the_report_vulture_checks_read(
+    default_assets: Path,
+) -> None:
+    with (default_assets / "vulture.toml").open("rb") as stream:
+        settings = tomllib.load(stream)["tool"]["vulture"]
+
+    assert not settings.keys() & {"make_whitelist", "sort_by_size", "verbose"}
 
 
 def test_the_starter_config_references_bundled_or_generated_files(
