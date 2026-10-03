@@ -76,6 +76,16 @@ checks:
       - --error-on-warning
       - .
 
+  - id: vulture
+    package_type: uvx
+    package: "vulture==2.16"
+    command: vulture
+
+    args:
+      - --config
+      - config_path: vulture.toml
+      - .
+
   - id: pytest
     package_type: uv
     package: null

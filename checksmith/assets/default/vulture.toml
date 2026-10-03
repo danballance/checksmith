@@ -1,0 +1,24 @@
+[tool.vulture]
+min_confidence = 60
+
+# Patterns match absolute paths, so excluding a name such as "build" would also
+# exclude a whole project checked out beneath a directory of that name.
+exclude = [
+    "*/.venv/*",
+    "*/venv/*",
+    "*/.tox/*",
+    "*/.nox/*",
+]
+ignore_decorators = [
+    "@field_validator",  # Pydantic
+    "@model_validator",  # Pydantic
+    "@pytest.fixture",
+    "@pytest.hookimpl",
+    "@*.command",        # Typer and Click
+    "@*.callback",       # Typer
+]
+ignore_names = [
+    "cls",           # classmethods, such as Pydantic validators
+    "model_config",  # Pydantic
+    "pytest_*",      # pytest hooks
+]

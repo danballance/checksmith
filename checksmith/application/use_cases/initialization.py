@@ -19,6 +19,7 @@ class Initializer:
         "ruff.toml",
         "semgrep.yaml",
         "coverage.toml",
+        "vulture.toml",
     )
     GENERATED_NAMES: ClassVar[tuple[str, ...]] = ("astcheck.yaml",)
 
