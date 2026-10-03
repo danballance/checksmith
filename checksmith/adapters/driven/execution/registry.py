@@ -49,6 +49,7 @@ class CommandFactory:
             CommandName.IMPORT_LINTER,
             CommandName.TY,
             CommandName.PYARCHGRAPH,
+            CommandName.VULTURE,
         ],
     ) -> CapturedOutputCommand: ...
 
@@ -100,6 +101,12 @@ class CommandFactory:
                     uv_prerequisites=self._uv_prerequisites,
                     source=self._launcher_source,
                     package=self._pytest_package,
+                )
+            case CommandName.VULTURE:
+                return VultureCommand(
+                    executor=self._executor,
+                    uv_prerequisites=self._uv_prerequisites,
+                    files=self._project_files,
                 )
 
     def registry(self) -> Mapping[CommandName, Command]:
